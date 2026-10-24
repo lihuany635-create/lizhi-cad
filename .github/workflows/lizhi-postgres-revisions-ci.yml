@@ -1,0 +1,77 @@
+name: LiZhi CAD Staging PostgreSQL DXF Revisions, RLS and Multi-Connection CAS
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-postgres-revisions-ci.yml'
+      - 'services/lizhi-cad-mcp-dev/postgres/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lizhi-staging-postgres-cad-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 13
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_postgres_test_only
+          POSTGRES_DB: cad_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cad_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install local PostgreSQL CLI
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          psql --version
+      - name: Run migration on disposable CI database
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGDATABASE: cad_ci
+          PGUSER: postgres
+          PGPASSWORD: ci_postgres_test_only
+        run: |
+          set -euo pipefail
+          psql -X -v ON_ERROR_STOP=1 -f services/lizhi-cad-mcp-dev/postgres/001_revision_store_staging.sql
+          # SQL is idempotent, so rerunning against the same disposable CI DB must work.
+          psql -X -v ON_ERROR_STOP=1 -f services/lizhi-cad-mcp-dev/postgres/001_revision_store_staging.sql
+          psql -X -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE lizhi_cad_ci_app LOGIN PASSWORD 'ci_runtime_test_only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+          GRANT USAGE ON SCHEMA lizhi_cad TO lizhi_cad_ci_app;
+          GRANT SELECT,INSERT,UPDATE ON lizhi_cad.drawing_heads,lizhi_cad.drawing_revisions TO lizhi_cad_ci_app;
+          GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA lizhi_cad TO lizhi_cad_ci_app;
+          SQL
+      - name: Run RLS, immutable DXF versions, digest and optimistic CAS tests as unprivileged app role
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGDATABASE: cad_ci
+          PGUSER: lizhi_cad_ci_app
+          PGPASSWORD: ci_runtime_test_only
+        run: |
+          set -euo pipefail
+          psql -X -v ON_ERROR_STOP=1 -f services/lizhi-cad-mcp-dev/postgres/test-revisions.sql
+          bash services/lizhi-cad-mcp-dev/postgres/test-concurrent.sh
+      - name: Verify no actual Supabase or cloud service credentials used
+        run: |
+          echo 'PASS: staging-only ephemeral postgres:16; no production Supabase URLs, service credentials or personal drawings used.'
