@@ -230,3 +230,37 @@ fn a_lazy_bridge_starts_without_the_app_and_says_how_to_open_it() {
     assert_ne!(r["result"]["isError"], json!(true), "{r}");
     app.join().unwrap();
 }
+
+#[test]
+fn lizhi_read_only_policy_hides_and_denies_mutations() {
+    use crate::tools::{lizhi_read_tool_allowed, tool_definitions_for_scope};
+
+    let tools = tool_definitions_for_scope(true, true);
+    let list = tools["tools"].as_array().expect("MCP tools array");
+    let names: Vec<&str> = list.iter().filter_map(|t| t["name"].as_str()).collect();
+    for expected in ["list_commands", "inspect_drawing", "query_entities", "find_text", "render"] {
+        assert!(names.contains(&expected), "Missing safe tool: {expected}");
+    }
+    assert_eq!(names.len(), 5, "No write or desktop UI tool may be advertised in read-only mode");
+    for prohibited in [
+        "command_line", "script", "execute", "new_drawing", "open", "save", "cancel",
+        "screenshot", "ui_inspect", "ui_click",
+    ] {
+        assert!(!names.contains(&prohibited), "Forbidden tool advertised: {prohibited}");
+        assert!(!lizhi_read_tool_allowed(prohibited, &json!({})));
+    }
+    let render = list.iter().find(|t| t["name"] == "render").expect("render tool");
+    assert!(render["inputSchema"]["properties"].get("path").is_none());
+    assert!(lizhi_read_tool_allowed("render", &json!({"width": 320, "height": 200})));
+    assert!(!lizhi_read_tool_allowed("render", &json!({"path": "/tmp/side-effect.png"})));
+    assert!(!lizhi_read_tool_allowed("render", &json!({"path": ""})));
+    assert!(lizhi_read_tool_allowed("inspect_drawing", &json!({})));
+    assert!(lizhi_read_tool_allowed("query_entities", &json!({"type": "Line"})));
+    // Normal local CADCraft mode remains intact when the opt-in guard is off.
+    let normal = tool_definitions_for_scope(true, false);
+    let normal_names: Vec<&str> = normal["tools"].as_array().expect("tools").iter()
+        .filter_map(|t| t["name"].as_str()).collect();
+    assert!(normal_names.contains(&"execute"));
+    assert!(normal_names.contains(&"ui_click"));
+    assert!(normal_names.contains(&"save"));
+}
