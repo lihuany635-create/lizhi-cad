@@ -1,0 +1,107 @@
+name: LiZhi CAD Fork Native/Desktop Web Artifact Build
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-build-artifacts.yml'
+      - 'apps/cadcraft/**'
+      - 'apps/cadcraft-web/**'
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-linux-binary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Linux CADCraft desktop build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libudev-dev libasound2-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      - name: Install fixed Rust 1.95.0
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+      - name: Build unmodified desktop app engine from LiZhi fork source
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package cadcraft
+          test -s target/release/cadcraft
+          mkdir -p cad-build-evidence
+          sha256sum target/release/cadcraft | tee cad-build-evidence/desktop-sha256.txt
+          file target/release/cadcraft
+          # Desktop UI still needs an interactive display E2E; binary existence is NOT UI PASS.
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: lizhi-cad-linux-desktop-candidate
+          path: |
+            target/release/cadcraft
+            cad-build-evidence/desktop-sha256.txt
+          retention-days: 14
+          if-no-files-found: error
+
+  browser-wasm-bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install fixed Rust with WebAssembly target
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.95.0
+      - name: Install checksum-verified Trunk v0.22.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          base='https://github.com/trunk-rs/trunk/releases/download/v0.22.0'
+          asset='trunk-x86_64-unknown-linux-gnu.tar.gz'
+          curl --fail --location --retry 3 --silent --show-error "$base/$asset" -o "$RUNNER_TEMP/$asset"
+          curl --fail --location --retry 3 --silent --show-error "$base/$asset.sha256" -o "$RUNNER_TEMP/$asset.sha256"
+          expected="$(tr -cd '0-9a-fA-F' < "$RUNNER_TEMP/$asset.sha256" | head -c 64)"
+          test "${#expected}" -eq 64
+          echo "$expected  $RUNNER_TEMP/$asset" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/trunk-bin"
+          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP/trunk-bin"
+          find "$RUNNER_TEMP/trunk-bin" -name trunk -type f -exec chmod +x {} \;
+          bin="$(find "$RUNNER_TEMP/trunk-bin" -name trunk -type f | head -n 1)"
+          test -x "$bin"
+          echo "$(dirname "$bin")" >> "$GITHUB_PATH"
+      - name: Build actual HTML/JS/WASM bundle (not just cargo check)
+        working-directory: apps/cadcraft-web
+        run: |
+          set -euo pipefail
+          trunk build --release
+          test -s ../../dist/web/index.html
+          find ../../dist/web -type f -maxdepth 2 -print
+          test "$(find ../../dist/web -name '*.wasm' | wc -l)" -ge 1
+          test "$(find ../../dist/web -name '*.js' | wc -l)" -ge 1
+          grep -q '立之 CAD' ../../dist/web/index.html
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: lizhi-cad-browser-wasm-candidate
+          path: dist/web/
+          retention-days: 14
+          if-no-files-found: error
