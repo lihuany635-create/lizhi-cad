@@ -16,6 +16,11 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: lizhi-native-mcp-${{ github.ref }}
+  cancel-in-progress: true
+
+
 jobs:
   native-mcp:
     runs-on: ubuntu-latest
