@@ -1,3 +1,5 @@
+> **v2.1 方向修正（2026-10-25）**：使用者已取消獨立雲端 CAD 引擎、雲端 DXF 長期資料庫與電腦關機由遠端 CAD Worker 繪圖。此文件保留早期測試成果供歷史查閱，不再是產品開發主線。現行架構： [LIBRARY_PATTERN_LOCAL_FIRST_V21.md](./LIBRARY_PATTERN_LOCAL_FIRST_V21.md)（參照立之圖書館：原檔本機留存、OAuth MCP 只提供使用者授權的索引／待辦；裝置在線時才執行真正繪圖）。
+
 # 立之 CAD｜網站尚未建立：網頁上線與 ChatGPT 原生 MCP 接入交接
 
 修訂：2026-10-24
