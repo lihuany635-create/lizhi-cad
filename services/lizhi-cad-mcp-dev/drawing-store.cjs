@@ -168,4 +168,4 @@ class DrawingStore {
     return versions;
   }
 }
-module.exports={DrawingStore,StoreError,MAX_DXF};
+module.exports={DrawingStore,StoreError,MAX_DXF,validateAsciiDXF:verifyDXF,validateDrawingId:goodId};
