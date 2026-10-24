@@ -14,7 +14,7 @@
 //! starts on the Start tab rather than an empty Drawing1, and the parent guards leaving the page.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use cadcraft_ui_egui::CadApp;
@@ -36,8 +36,9 @@ pub struct Bridge {
     window: web_sys::Window,
     parent: web_sys::Window,
     origin: String,
-    pending: Rc<RefCell<HashSet<String>>>,
-    failed: Rc<Cell<bool>>,
+    pending: Rc<RefCell<HashMap<String, String>>>,
+    failed: Rc<RefCell<HashSet<String>>>,
+    verified: Rc<RefCell<Vec<String>>>,
     next_id: Rc<Cell<u64>>,
 }
 
@@ -57,7 +58,8 @@ impl Bridge {
         Some(Self {
             window, parent, origin,
             pending: Rc::default(),
-            failed: Rc::new(Cell::new(false)),
+            failed: Rc::default(),
+            verified: Rc::default(),
             next_id: Rc::new(Cell::new(0)),
         })
     }
@@ -81,6 +83,7 @@ impl Bridge {
         let origin = self.origin.clone();
         let pending = self.pending.clone();
         let failed = self.failed.clone();
+        let verified = self.verified.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
                 return;
@@ -88,9 +91,14 @@ impl Bridge {
             let data = event.data();
             if string(&data, "type").as_deref() == Some("cadcraft:save-ack") {
                 let Some(request_id) = string(&data, "requestId") else { return };
-                if pending.borrow_mut().remove(&request_id) {
+                if let Some(name) = pending.borrow_mut().remove(&request_id) {
                     let ok = js_sys::Reflect::get(&data, &JsValue::from_str("ok")).ok().and_then(|v| v.as_bool()) == Some(true);
-                    failed.set(!ok);
+                    if ok {
+                        failed.borrow_mut().remove(&name);
+                        verified.borrow_mut().push(name);
+                    } else if name.to_ascii_lowercase().ends_with(".dxf") || name.to_ascii_lowercase().ends_with(".dwg") {
+                        failed.borrow_mut().insert(name);
+                    }
                     ctx.request_repaint();
                 }
                 return;
@@ -116,10 +124,30 @@ impl Bridge {
         }
     }
 
+    /// Consume exactly-once verified disk acknowledgements and finalize only their matching
+    /// drawing. A failure leaves the engine's DocState.save_pending dirty; another drawing's
+    /// success cannot silently clear it.
+    pub fn apply_verified_saves(&self, app: &mut CadApp) {
+        let names = std::mem::take(&mut *self.verified.borrow_mut());
+        for name in names {
+            if self.failed.borrow().contains(&name)
+                || self.pending.borrow().values().any(|pending_name| pending_name == &name)
+            {
+                continue;
+            }
+            for doc in &mut app.session.docs {
+                let matches = doc.path.as_deref().is_some_and(|p| p == name || p.rsplit(['/', '\\']).next() == Some(name.as_str()));
+                if matches {
+                    doc.save_pending = false;
+                }
+            }
+        }
+    }
+
     /// After each frame: tell the parent when unsaved changes appear or go away.
     pub fn report_dirty(&self, app: &CadApp, reported: &DirtyReport) {
         let dirty = app.session.docs.iter().any(|d| d.is_dirty())
-            || !self.pending.borrow().is_empty() || self.failed.get();
+            || !self.pending.borrow().is_empty() || !self.failed.borrow().is_empty();
         if reported.0.get() != Some(dirty) && self.send(&[("type", "cadcraft:dirty".into()), ("dirty", dirty.into())]) {
             reported.0.set(Some(dirty));
         }
@@ -134,13 +162,15 @@ impl Bridge {
             ("type", "cadcraft:save".into()), ("name", name.into()),
             ("requestId", request_id.clone().into()), ("bytes", buffer.clone().into()),
         ]).ok_or_else(|| "couldn't build the message".to_string())?;
-        self.pending.borrow_mut().insert(request_id.clone());
+        self.pending.borrow_mut().insert(request_id.clone(), name.to_string());
         let sent = self.parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")));
         if sent.is_err() {
             self.pending.borrow_mut().remove(&request_id);
-            self.failed.set(true);
+            if name.to_ascii_lowercase().ends_with(".dxf") || name.to_ascii_lowercase().ends_with(".dwg") {
+                self.failed.borrow_mut().insert(name.to_string());
+            }
         }
         sent
     }
@@ -152,7 +182,7 @@ impl Bridge {
 }
 
 /// The engine's delivery hook in host mode ([`cadcraft_engine::cmd::file::set_deliver`]): hand
-/// the file to the parent page. `Ok` once it was posted; the engine then counts a drawing as saved.
+/// the file to the parent page. `Ok` means transport only; DocState remains dirty\n/// until a verified storage acknowledgement is processed.
 pub fn deliver(name: &str, _mime: &str, bytes: &[u8]) -> Result<(), String> {
     let bridge = BRIDGE.with(|b| b.borrow().clone()).ok_or("the page that embeds CADCraft is gone")?;
     bridge.post_save(name, bytes)
