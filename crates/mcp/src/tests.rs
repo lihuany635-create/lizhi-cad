@@ -264,3 +264,43 @@ fn lizhi_read_only_policy_hides_and_denies_mutations() {
     assert!(normal_names.contains(&"ui_click"));
     assert!(normal_names.contains(&"save"));
 }
+
+#[test]
+fn lizhi_geometry_only_tool_policy_is_fail_closed() {
+    use crate::tools::{lizhi_geometry_tool_allowed, lizhi_read_tool_allowed, tool_definitions_for_policy};
+
+    let tools = tool_definitions_for_policy(true, false, true);
+    let names: Vec<&str> = tools["tools"].as_array().unwrap().iter()
+        .filter_map(|item| item["name"].as_str()).collect();
+    for expected in ["list_commands", "inspect_drawing", "query_entities", "find_text", "render", "new_drawing", "execute"] {
+        assert!(names.contains(&expected), "Missing geometry tool: {expected}");
+    }
+    assert_eq!(names.len(), 7, "Geometry mode must expose only 7 safe tools");
+    for denied in ["command_line", "script", "open", "save", "cancel", "screenshot", "ui_inspect", "ui_click"] {
+        assert!(!names.contains(&denied), "Forbidden tool advertised: {denied}");
+        assert!(!lizhi_geometry_tool_allowed(denied, &json!({})));
+    }
+    let render = tools["tools"].as_array().unwrap().iter().find(|t| t["name"] == "render").unwrap();
+    assert!(render["inputSchema"]["properties"].get("path").is_none());
+    assert!(lizhi_geometry_tool_allowed("render", &json!({"width": 640, "height": 480})));
+    assert!(!lizhi_geometry_tool_allowed("render", &json!({"width": 4097})));
+    assert!(!lizhi_geometry_tool_allowed("render", &json!({"height": -1})));
+    assert!(!lizhi_geometry_tool_allowed("render", &json!({"path": "/tmp/unsafe.png"})));
+    for allowed in ["circle", "rectang", "line", "layer.new", "move", "zoom", "undo"] {
+        assert!(lizhi_geometry_tool_allowed("execute", &json!({"command": allowed, "params": {}})), "{allowed}");
+    }
+    for denied in ["open", "save", "saveas", "exportpdf", "import", "script", "file.read", "quit", "ui.click", "", "CIRCLE"] {
+        assert!(!lizhi_geometry_tool_allowed("execute", &json!({"command": denied, "params": {}})), "{denied}");
+    }
+    assert!(!lizhi_geometry_tool_allowed("execute", &json!({})));
+    assert!(!lizhi_geometry_tool_allowed("execute", &json!({"command": 4})));
+    // When both flags are true, read-only takes precedence.
+    let ro = tool_definitions_for_policy(true, true, true);
+    let ro_names: Vec<&str> = ro["tools"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert_eq!(ro_names.len(), 5);
+    assert!(!ro_names.contains(&"execute"));
+    assert!(lizhi_read_tool_allowed("inspect_drawing", &json!({})));
+    // Normal CADCraft still offers its full native tool set.
+    let unrestricted = tool_definitions_for_policy(true, false, false);
+    assert!(unrestricted["tools"].as_array().unwrap().iter().any(|t| t["name"] == "open"));
+}
