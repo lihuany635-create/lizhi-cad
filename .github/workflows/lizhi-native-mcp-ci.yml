@@ -1,0 +1,70 @@
+name: LiZhi CAD Fork Native MCP and Source Build
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - 'crates/mcp/**'
+      - 'scripts/lizhi-native-mcp-smoke.cjs'
+      - '.github/workflows/lizhi-native-mcp-ci.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-mcp:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - name: Check out LiZhi FORK source (not official binary)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify pinned source parent and licenses
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor bad1073fdf10a521949f6b542837b564719d0023 HEAD
+          test -f LICENSE-MIT
+          test -f LICENSE-APACHE
+          test -f NOTICE
+          test -f docs/brand/LICENSE-brand.txt
+          test -f crates/mcp/src/tools.rs
+          test -f apps/cadcraft-cli/Cargo.toml
+          echo "LiZhi fork commit: $(git rev-parse HEAD)"
+      - name: Install Rust 1.95
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup override set 1.95.0
+          rustc --version
+      - name: Compile and run native MCP unit tests (including read-only guard)
+        run: cargo test --locked --package cadcraft-mcp --lib
+      - name: Build LiZhi native CADCraft CLI FROM FORK RUST SOURCE
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package cadcraft-cli
+          test -x target/release/cadcraft-cli
+          target/release/cadcraft-cli --version
+      - name: Real JSON-RPC native MCP editing, render and DXF reopen
+        run: |
+          set -euo pipefail
+          node scripts/lizhi-native-mcp-smoke.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/full"
+      - name: Read-only native MCP must reject mutation and disk write
+        run: |
+          set -euo pipefail
+          node scripts/lizhi-native-mcp-smoke.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/readonly" --readonly
+      - name: Upload test-only drawings and MCP evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lizhi-fork-native-mcp-source-built
+          path: cad-evidence/
+          retention-days: 14
+          if-no-files-found: warn
