@@ -70,6 +70,11 @@ jobs:
         run: |
           set -euo pipefail
           node services/lizhi-cad-mcp-dev/dev-http-smoke.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/http-dev"
+      - name: Real native DXF versions across HTTP sessions and service restart
+        run: |
+          set -euo pipefail
+          node services/lizhi-cad-mcp-dev/drawing-store-test.cjs
+          node services/lizhi-cad-mcp-dev/drawing-mcp-integration-test.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/versions"
       - name: Upload test-only drawings and MCP evidence
         if: always()
         uses: actions/upload-artifact@v4
