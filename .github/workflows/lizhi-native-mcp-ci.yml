@@ -7,6 +7,7 @@ on:
     paths:
       - 'crates/mcp/**'
       - 'scripts/lizhi-native-mcp-smoke.cjs'
+      - 'services/lizhi-cad-mcp-dev/**'
       - '.github/workflows/lizhi-native-mcp-ci.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -65,6 +66,10 @@ jobs:
         run: |
           set -euo pipefail
           node scripts/lizhi-native-mcp-smoke.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/geometry-only" --geometry-only
+      - name: Local authenticated HTTP MCP transport to REAL fork native geometry engine
+        run: |
+          set -euo pipefail
+          node services/lizhi-cad-mcp-dev/dev-http-smoke.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/http-dev"
       - name: Upload test-only drawings and MCP evidence
         if: always()
         uses: actions/upload-artifact@v4
