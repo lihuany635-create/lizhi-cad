@@ -4,7 +4,28 @@ use serde_json::{Value, json};
 
 use crate::backend::Backend;
 
+/// Optional process-wide MCP read-only guard for the Lizhi CAD fork.
+/// This is NOT user authentication: launchers must still authenticate and isolate
+/// each user, drawing and process before exposing the stdio channel remotely.
+fn lizhi_read_only() -> bool {
+    std::env::var("LIZHI_CAD_MCP_READ_ONLY").is_ok_and(|v| v == "1")
+}
+
+/// Reject all drawing/file mutations in read-only mode. In particular, `render`
+/// accepts a filesystem `path`, so it is read-only only when that path is absent.
+pub(crate) fn lizhi_read_tool_allowed(name: &str, args: &Value) -> bool {
+    match name {
+        "list_commands" | "inspect_drawing" | "query_entities" | "find_text" => true,
+        "render" => args.get("path").is_none_or(Value::is_null),
+        _ => false,
+    }
+}
+
 pub fn tool_definitions(has_ui: bool) -> Value {
+    tool_definitions_for_scope(has_ui, lizhi_read_only())
+}
+
+pub(crate) fn tool_definitions_for_scope(has_ui: bool, read_only: bool) -> Value {
     let mut tools = vec![
         json!({"name": "command_line", "description": "Type one line at the CADCraft command line, exactly as a user would at an AutoCAD-style prompt. Starts commands by name or alias (LINE, L, CIRCLE, C, PLINE, RECTANG, MOVE, TRIM, OFFSET, ZOOM…) and answers the active prompt: points `x,y`, relative `@dx,dy`, polar `@dist<angle`, distances, keywords (e.g. `c` for Close), empty text = Enter. Spaces act as Enter, so `circle 0,0 5` works in one call. Returns the new prompt and command-line output, and `error` when the line was refused.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}),
@@ -38,6 +59,15 @@ pub fn tool_definitions(has_ui: bool) -> Value {
         tools.push(json!({"name": "screenshot", "description": "Screenshot the CADCraft window (PNG).", "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}}}));
         tools.push(json!({"name": "ui_inspect", "description": "UI state: panels, canvas rect, view, cursor and snap, performance.", "inputSchema": {"type": "object", "properties": {}}}));
         tools.push(json!({"name": "ui_click", "description": "Click in the drawing area at world coordinates (or screen with space:\"screen\"). Right button = Enter.", "inputSchema": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "space": {"type": "string"}, "button": {"type": "string"}}, "required": ["x", "y"]}}));
+    }
+    if read_only {
+        tools.retain(|tool| tool["name"].as_str().is_some_and(|name| lizhi_read_tool_allowed(name, &Value::Null)));
+        // Do not advertise a filesystem output parameter to read-only clients.
+        if let Some(render) = tools.iter_mut().find(|tool| tool["name"] == "render") {
+            if let Some(properties) = render["inputSchema"]["properties"].as_object_mut() {
+                properties.remove("path");
+            }
+        }
     }
     json!({ "tools": tools })
 }
@@ -109,6 +139,10 @@ fn command_matches(c: &Value, f: &str) -> bool {
 /// schema), answered with JSON-RPC invalid params; a failing tool is an `isError` result.
 pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, String> {
     let a = check_args(name, args)?;
+    // Enforce at dispatch time too: hiding tools from tools/list is not enough.
+    if lizhi_read_only() && !lizhi_read_tool_allowed(name, &a) {
+        return Err(format!("read-only MCP denies `{name}` or its filesystem output"));
+    }
     let r = match name {
         "command_line" => b.call("cmdline.input", a),
         "script" => b.call("cmdline.script", a),
