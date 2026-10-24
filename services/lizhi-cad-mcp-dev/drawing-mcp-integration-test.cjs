@@ -62,7 +62,8 @@ async function run(){
 
     const forbidden=await a.send("tools/call",{name:"lizhi_internal_snapshot_save",arguments:{capability:"fake"}},session1);
     assert.equal(forbidden.body.error?.code,-32601);
-    await a.tool(session1,"save",{path:"/etc/passwd"},true);
+    const deniedNative=await a.send("tools/call",{name:"save",arguments:{path:"/etc/passwd"}},session1);
+    assert.equal(deniedNative.body.error?.code,-32602,"Geometry-only Rust MCP must reject hidden native save");
     ok("Remote client cannot call internal snapshots or native file paths");
 
     const newDrawing=await a.tool(session1,"lizhi_create_drawing",{drawingId:"cabinet_01"});
