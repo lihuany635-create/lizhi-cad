@@ -1,11 +1,4 @@
-<p align="center">
-  <a href="https://getartcraft.com/">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="docs/brand/artcraft-logo-white.svg">
-      <img alt="ArtCraft" src="docs/brand/artcraft-logo.svg" width="200">
-    </picture>
-  </a>
-</p>
+> **LiZhi CAD — independent CADCraft source fork, under development.** 本倉庫在官方 CADCraft 原始碼基礎上進行獨立修改，**並非 ArtCraft 官方產品或官方背書**。原始作者與專案：[CADCraft by the ArtCraft team](https://github.com/storytold/cadcraft)。上游程式碼按 MIT OR Apache-2.0 授權；ArtCraft 商標不屬於該授權。此開發分支不代表已發布可用的 ChatGPT CAD App。
 
 <p align="center">
   <img src="assets/app-icon/hicolor/256x256/apps/ai.storyteller.cadcraft.png" width="128" height="128" alt="CADCraft icon: a drafting set square and compass arc on a blue grid tile">
@@ -21,7 +14,7 @@
   A fast, open-source CAD workflow: the command line, object snaps, layers,
   dimensions, hatches, blocks and DXF drawings you already know. It runs natively on macOS,
   Windows, Linux and FreeBSD, and in the browser via WebAssembly.<br>
-  <i>By the ArtCraft team.</i>
+  <i>Originally created by the ArtCraft team; independently adapted by the LiZhi project.</i>
 </p>
 
 <p align="center">
@@ -412,9 +405,6 @@ ArtCraft Team and are not covered by this license. They may be used only unmodif
 part of this repository and CADCraft, under [`docs/brand/LICENSE-brand.txt`](docs/brand/LICENSE-brand.txt).
 Forks and modified versions must remove them.
 
-<p align="center">
-  <a href="https://getartcraft.com/"><img alt="ArtCraft" src="docs/brand/artcraft-mark.svg" width="28"></a><br>
-  <sub>Made by the <a href="https://getartcraft.com/">ArtCraft</a> team and community.</sub>
-</p>
+<p align="center"><sub>Original CADCraft: © 2026 ArtCraft Team and contributors. LiZhi CAD is an independent fork; not affiliated with or endorsed by ArtCraft.</sub></p>
 
 Tool Sets, Layers, and Properties can be regrouped, split, floated within the app window, closed, and reopened. The drawing canvas stays visible and cannot be closed or turned into a tab. Drag a panel header to a target edge or another header. Its context menu offers Float panel, Move to group, and Close panel. Existing panel toggles reopen panels at their saved location; Reset Panel Layout restores the app layout. Floating panels remain inside the current app window.
