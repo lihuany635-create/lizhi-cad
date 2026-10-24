@@ -147,7 +147,7 @@ async function run(){
       await fs.mkdir(evidence,{recursive:true});
       await fs.writeFile(path.join(evidence,"drawing-native-mcp-versions.json"),JSON.stringify(report,null,2));
     }
-    assert.equal(tests,8);
+    assert.equal(tests,9);
     console.log("LIZHI_CAD_NATIVE_DXF_VERSIONS_E2E_PASS",JSON.stringify(report));
   }finally{
     if(B)await B.close().catch(()=>{});
