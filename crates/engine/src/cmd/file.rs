@@ -75,6 +75,16 @@ pub type DeliverHook = fn(&str, &str, &[u8]) -> std::result::Result<(), String>;
 
 static DELIVER: OnceLock<DeliverHook> = OnceLock::new();
 
+#[cfg(target_arch = "wasm32")]
+static SAVE_HOST_ACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Host mode must not mark the engine drawing clean until disk ACK is received.
+/// Default false: standalone web downloads and all native CLI/desktop builds are unchanged.
+#[cfg(target_arch = "wasm32")]
+pub fn set_deferred_save_ack(enabled: bool) {
+    SAVE_HOST_ACK.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Install the host's file delivery (the web app: a browser download). Saving uses it on wasm;
 /// anything else that produces a file on the web (plots) can use [`deliver`] too.
 pub fn set_deliver(h: DeliverHook) {
@@ -440,6 +450,12 @@ fn commit_save(s: &mut Session, path: &str, bytes: &[u8], store: impl FnOnce(&st
     }
     let st = s.state_mut()?;
     st.saved = st.drawing().clone();
+    // Only the embedded browser host commits asynchronously. A completed postMessage
+    // does NOT prove the DXF is on disk; preserve dirty until the exact save-ack.
+    #[cfg(target_arch = "wasm32")]
+    {
+        st.save_pending = SAVE_HOST_ACK.load(std::sync::atomic::Ordering::Relaxed);
+    }
     st.path = Some(path.to_string());
     st.title = file_name(path);
     // A BEgin group still open when the drawing is saved ends there.
