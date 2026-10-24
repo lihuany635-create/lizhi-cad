@@ -79,7 +79,7 @@ jobs:
           asset='trunk-x86_64-unknown-linux-gnu.tar.gz'
           curl --fail --location --retry 3 --silent --show-error "$base/$asset" -o "$RUNNER_TEMP/$asset"
           curl --fail --location --retry 3 --silent --show-error "$base/$asset.sha256" -o "$RUNNER_TEMP/$asset.sha256"
-          expected="$(tr -cd '0-9a-fA-F' < "$RUNNER_TEMP/$asset.sha256" | head -c 64)"
+          expected="$(awk 'NR==1 { print $1 }' "$RUNNER_TEMP/$asset.sha256")"
           test "${#expected}" -eq 64
           echo "$expected  $RUNNER_TEMP/$asset" | sha256sum --check
           mkdir -p "$RUNNER_TEMP/trunk-bin"
