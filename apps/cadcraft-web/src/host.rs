@@ -4,16 +4,18 @@
 //! - `cadcraft:ready` (to the parent): `{ version }`, the app is listening; send a drawing now.
 //! - `cadcraft:open` (from the parent): `{ name, bytes }`, bytes an `ArrayBuffer` or
 //!   `Uint8Array`. It opens like a file picked with File › Open or dropped on the window.
-//! - `cadcraft:save` (to the parent): `{ name, bytes }` (a transferred `ArrayBuffer`) for every
+//! - `cadcraft:save` (to the parent): `{ requestId, name, bytes }` (a transferred `ArrayBuffer`) for every
 //!   file CADCraft would otherwise download (SAVE, SAVEAS, exports): it replaces the engine's
 //!   delivery hook. The parent stores the file and reports failures itself.
-//! - `cadcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
+//! - `cadcraft:save-ack` (from the parent): `{ requestId, ok }` after verified persistence.\n//!   Pending/failed delivery keeps parent-visible dirty true until a good ACK.\n//! - `cadcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `cadcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 //!
 //! Only the parent window on the page's own origin is heard or answered. In host mode the app
 //! starts on the Start tab rather than an empty Drawing1, and the parent guards leaving the page.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
+use std::rc::Rc;
 
 use cadcraft_ui_egui::CadApp;
 use wasm_bindgen::JsCast as _;
@@ -34,6 +36,9 @@ pub struct Bridge {
     window: web_sys::Window,
     parent: web_sys::Window,
     origin: String,
+    pending: Rc<RefCell<HashSet<String>>>,
+    failed: Rc<Cell<bool>>,
+    next_id: Rc<Cell<u64>>,
 }
 
 /// The unsaved-changes state last reported to the parent.
@@ -49,7 +54,12 @@ impl Bridge {
             return None;
         }
         let origin = window.location().origin().ok()?;
-        Some(Self { window, parent, origin })
+        Some(Self {
+            window, parent, origin,
+            pending: Rc::default(),
+            failed: Rc::new(Cell::new(false)),
+            next_id: Rc::new(Cell::new(0)),
+        })
     }
 
     /// Make this the bridge [`deliver`] uses.
@@ -66,14 +76,25 @@ impl Bridge {
     }
 
     /// Hear drawings from the parent; they arrive through the upload inbox.
-    pub fn listen(&self, inbox: crate::upload::Inbox) {
+    pub fn listen(&self, inbox: crate::upload::Inbox, ctx: egui::Context) {
         let parent = self.parent.clone();
         let origin = self.origin.clone();
+        let pending = self.pending.clone();
+        let failed = self.failed.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
                 return;
             }
             let data = event.data();
+            if string(&data, "type").as_deref() == Some("cadcraft:save-ack") {
+                let Some(request_id) = string(&data, "requestId") else { return };
+                if pending.borrow_mut().remove(&request_id) {
+                    let ok = js_sys::Reflect::get(&data, &JsValue::from_str("ok")).ok().and_then(|v| v.as_bool()) == Some(true);
+                    failed.set(!ok);
+                    ctx.request_repaint();
+                }
+                return;
+            }
             if string(&data, "type").as_deref() != Some("cadcraft:open") {
                 return;
             }
@@ -97,19 +118,31 @@ impl Bridge {
 
     /// After each frame: tell the parent when unsaved changes appear or go away.
     pub fn report_dirty(&self, app: &CadApp, reported: &DirtyReport) {
-        let dirty = app.session.docs.iter().any(|d| d.is_dirty());
+        let dirty = app.session.docs.iter().any(|d| d.is_dirty())
+            || !self.pending.borrow().is_empty() || self.failed.get();
         if reported.0.get() != Some(dirty) && self.send(&[("type", "cadcraft:dirty".into()), ("dirty", dirty.into())]) {
             reported.0.set(Some(dirty));
         }
     }
 
     fn post_save(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
+        let next = self.next_id.get().wrapping_add(1);
+        self.next_id.set(next);
+        let request_id = format!("cad-save-{next}");
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
-        let message = message(&[("type", "cadcraft:save".into()), ("name", name.into()), ("bytes", buffer.clone().into())])
-            .ok_or_else(|| "couldn't build the message".to_string())?;
-        self.parent
+        let message = message(&[
+            ("type", "cadcraft:save".into()), ("name", name.into()),
+            ("requestId", request_id.clone().into()), ("bytes", buffer.clone().into()),
+        ]).ok_or_else(|| "couldn't build the message".to_string())?;
+        self.pending.borrow_mut().insert(request_id.clone());
+        let sent = self.parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
-            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")))
+            .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")));
+        if sent.is_err() {
+            self.pending.borrow_mut().remove(&request_id);
+            self.failed.set(true);
+        }
+        sent
     }
 
     /// Post a message to the parent; false if it couldn't be sent.
