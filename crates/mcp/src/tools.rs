@@ -187,9 +187,47 @@ fn command_matches(c: &Value, f: &str) -> bool {
         || c["aliases"].as_array().is_some_and(|a| a.iter().filter_map(Value::as_str).any(has))
 }
 
+/// Internal-only snapshot io. This is deliberately absent from tools/list.
+/// It is ONLY available inside a geometry-only process with an unpredictable
+/// per-process capability injected by the trusted LOCAL session host.
+/// No path is read from a tool call: only the process's fixed sandbox path.
+/// This is a prototype boundary, not an OAuth or network authentication layer.
+fn lizhi_internal_snapshot(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, String> {
+    if lizhi_read_only() || !lizhi_geometry_only() {
+        return Err("internal CAD snapshot is not enabled".into());
+    }
+    let expected = std::env::var("LIZHI_CAD_MCP_INTERNAL_CAPABILITY").unwrap_or_default();
+    let given = args.get("capability").and_then(Value::as_str).unwrap_or_default();
+    // Constant-time equality avoids leaking a token byte prefix via an auth oracle.
+    let allowed = expected.len() == 64
+        && given.len() == expected.len()
+        && expected.bytes().zip(given.bytes()).fold(0_u8, |diff, (a, b)| diff | (a ^ b)) == 0;
+    if !allowed {
+        return Err("internal CAD snapshot capability denied".into());
+    }
+    let snapshot = std::env::var("LIZHI_CAD_MCP_INTERNAL_SNAPSHOT").map_err(|_| "no sandbox snapshot path")?;
+    // The path is set by the trusted host, never by model-supplied arguments.
+    if !snapshot.ends_with("/native-snapshot.dxf") {
+        return Err("invalid sandbox snapshot path".into());
+    }
+    let method = match name {
+        "lizhi_internal_snapshot_save" => "app.save",
+        "lizhi_internal_snapshot_open" => "app.open",
+        _ => return Err("unknown internal snapshot operation".into()),
+    };
+    let result = b.call(method, json!({ "path": snapshot }));
+    Ok(match result {
+        Ok(v) => text(&v),
+        Err(e) => err_text(&e),
+    })
+}
+
 /// Run a tool. `Err` is a protocol error (unknown tool, or arguments that don't fit its input
 /// schema), answered with JSON-RPC invalid params; a failing tool is an `isError` result.
 pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, String> {
+    if matches!(name, "lizhi_internal_snapshot_save" | "lizhi_internal_snapshot_open") {
+        return lizhi_internal_snapshot(b, name, args);
+    }
     let a = check_args(name, args)?;
     // Enforce at dispatch time too: hiding tools from tools/list is not enough.
     if lizhi_read_only() && !lizhi_read_tool_allowed(name, &a) {
