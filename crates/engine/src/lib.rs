@@ -133,6 +133,8 @@ pub struct DocState {
     pub path: Option<String>,
     pub title: String,
     pub saved: Arc<Drawing>,
+    /// The web host has received serialized bytes but has not confirmed durable storage yet.
+    pub save_pending: bool,
     pub revision: u64,
     pub space: Space,
     /// Tiled model viewports (VPORTS).
@@ -156,6 +158,7 @@ impl DocState {
         let doc = Arc::new(doc);
         DocState {
             saved: doc.clone(),
+            save_pending: false,
             doc,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -178,7 +181,7 @@ impl DocState {
     /// The drawing has changes not saved to its file, or the Block Editor has changes not yet
     /// saved into its block.
     pub fn is_dirty(&self) -> bool {
-        !Arc::ptr_eq(self.drawing(), &self.saved) || self.block_unsaved()
+        self.save_pending || !Arc::ptr_eq(self.drawing(), &self.saved) || self.block_unsaved()
     }
     /// After undo/redo replaced the drawing (`before` is the one shown until then): if the current
     /// layout no longer exists, follow it to its other name when it was renamed (same tab order,
