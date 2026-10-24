@@ -147,7 +147,7 @@ mod web {
                             None
                         }));
                         let host = app_bridge.map(|bridge| {
-                            bridge.listen(inbox.clone());
+                            bridge.listen(inbox.clone(), cc.egui_ctx.clone());
                             bridge.post_ready();
                             (bridge, crate::host::DirtyReport::default())
                         });
