@@ -45,12 +45,15 @@ async function client(app,token){
 async function run(){
   const tmp=await fs.mkdtemp(path.join(os.tmpdir(),"lizhi-native-dxf-revision-e2e-"));
   const root=path.join(tmp,"store");
+  const pgUrl=process.env.LIZHI_CAD_CI_POSTGRES_URL||null;
+  const pgPool=pgUrl?new (require("pg").Pool)({connectionString:pgUrl,max:8}):null;
+  const storage=pgPool?{postgresPool:pgPool}:{storeRoot:root};
   let A=null,B=null,restarted=null;
   let tests=0;
   function ok(name){tests++;console.log("PASS",name)}
   try{
     const secretA=randomToken();
-    A=createDevServer({cliPath:bin,token:secretA,storeRoot:root,ownerId:"owner_A"});
+    A=createDevServer({cliPath:bin,token:secretA,...storage,ownerId:"owner_A"});
     const a=await client(A,secretA);
     const session1=await a.init();
     const list=await a.send("tools/list",{},session1);
@@ -100,7 +103,7 @@ async function run(){
     ok("New native Rust process opens old and latest real DXF with correct geometry");
 
     const secretB=randomToken();
-    B=createDevServer({cliPath:bin,token:secretB,storeRoot:root,ownerId:"owner_B"});
+    B=createDevServer({cliPath:bin,token:secretB,...storage,ownerId:"owner_B"});
     const b=await client(B,secretB);
     const other=await b.init();
     const denied=await b.tool(other,"lizhi_open_revision",{drawingId:"cabinet_01"},true);
@@ -128,7 +131,7 @@ async function run(){
 
     await A.close();A=null;
     const newToken=randomToken();
-    restarted=createDevServer({cliPath:bin,token:newToken,storeRoot:root,ownerId:"owner_A"});
+    restarted=createDevServer({cliPath:bin,token:newToken,...storage,ownerId:"owner_A"});
     const c=await client(restarted,newToken);
     const s=await c.init();
     const openAfterRestart=await c.tool(s,"lizhi_open_revision",{drawingId:"cabinet_01"});
@@ -140,7 +143,7 @@ async function run(){
     ok("After HTTP service restart: original native DXF drawing and all revisions are restored");
 
     const report={name:"LiZhi native CADCraft MCP + local immutable DXF end-to-end",
-      passed:tests,revisionCount:3,latestEntityCount:draw.entityCount,
+      passed:tests,backend:pgPool?"postgresql":"local-filesystem",revisionCount:3,latestEntityCount:draw.entityCount,
       isolatedOwners:true,blockedPathAccess:true,staleWriteRejected:true,
       nativeReopenAfterGatewayRestart:true,fullCloudOAuth:false,
       publicNetworkAccess:false,multiHostSafe:false,productionReady:false};
@@ -154,6 +157,7 @@ async function run(){
     if(B)await B.close().catch(()=>{});
     if(restarted)await restarted.close().catch(()=>{});
     if(A)await A.close().catch(()=>{});
+    if(pgPool)await pgPool.end().catch(()=>{});
     await fs.rm(tmp,{recursive:true,force:true});
   }
 }
