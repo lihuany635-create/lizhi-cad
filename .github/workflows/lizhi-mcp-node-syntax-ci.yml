@@ -1,0 +1,39 @@
+name: LiZhi CAD MCP Bridge Node Safety and Syntax (Fast)
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-mcp-node-syntax-ci.yml'
+      - 'services/lizhi-cad-mcp-dev/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lizhi-mcp-node-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Syntax check trusted gateway and all local versioning tests
+        run: |
+          set -euo pipefail
+          node --version
+          for source in services/lizhi-cad-mcp-dev/*.cjs; do
+            echo "Checking: $source"
+            node --check "$source"
+          done
+      - name: Local immutable revision security regression
+        run: node services/lizhi-cad-mcp-dev/drawing-store-test.cjs
+      - name: Enforce no live external gateway in this workflow
+        run: |
+          echo 'This workflow never opens public ports, registers remote OAuth apps or deploys a CAD site.'
