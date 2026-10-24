@@ -1,0 +1,32 @@
+name: LiZhi CAD Local DXF Immutable Revision Store Safety Tests
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-dxf-revision-store-ci.yml'
+      - 'services/lizhi-cad-mcp-dev/drawing-store.cjs'
+      - 'services/lizhi-cad-mcp-dev/drawing-store-test.cjs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-revision-store:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Validate prototype source syntax
+        run: |
+          node --check services/lizhi-cad-mcp-dev/drawing-store.cjs
+          node --check services/lizhi-cad-mcp-dev/drawing-store-test.cjs
+      - name: Execute real filesystem version, integrity and isolation tests
+        run: node services/lizhi-cad-mcp-dev/drawing-store-test.cjs
+      - name: Report local-only scope
+        run: |
+          echo 'Verified isolated local DXF storage only; no OAuth, remote deployment, multi-host lock or cloud persistence claim.'
