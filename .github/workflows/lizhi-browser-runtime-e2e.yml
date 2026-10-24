@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   real-browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # Chromium/Playwright 1.56 supports Ubuntu 24.04, not runner's Ubuntu 26.04
     timeout-minutes: 22
     steps:
       - uses: actions/checkout@v4
