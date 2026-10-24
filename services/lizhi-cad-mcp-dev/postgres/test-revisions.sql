@@ -9,25 +9,25 @@ DECLARE
   stored bytea;
   sha text;
 BEGIN
-  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',0,sample1,encode(digest(sample1,'sha256'),'hex'));
+  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',0,sample1,encode(sha256(sample1),'hex'));
   IF r.result_status<>'SAVED' OR r.new_revision<>1 THEN RAISE EXCEPTION 'v1 save failed'; END IF;
   RAISE NOTICE 'PASS PostgreSQL saved first DXF revision with integrity digest';
 
-  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',1,sample2,encode(digest(sample2,'sha256'),'hex'));
+  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',1,sample2,encode(sha256(sample2),'hex'));
   IF r.result_status<>'SAVED' OR r.new_revision<>2 THEN RAISE EXCEPTION 'v2 save failed'; END IF;
   RAISE NOTICE 'PASS PostgreSQL saved v2 while preserving v1';
 
   SELECT dxf,sha256 INTO stored,sha FROM lizhi_cad.load_revision('cabinet',1);
-  IF stored IS DISTINCT FROM sample1 OR sha<>encode(digest(sample1,'sha256'),'hex') THEN
+  IF stored IS DISTINCT FROM sample1 OR sha<>encode(sha256(sample1),'hex') THEN
      RAISE EXCEPTION 'v1 DXF corrupted';
   END IF;
   SELECT dxf,sha256 INTO stored,sha FROM lizhi_cad.load_revision('cabinet');
-  IF stored IS DISTINCT FROM sample2 OR sha<>encode(digest(sample2,'sha256'),'hex') THEN
+  IF stored IS DISTINCT FROM sample2 OR sha<>encode(sha256(sample2),'hex') THEN
      RAISE EXCEPTION 'latest DXF corrupted';
   END IF;
   RAISE NOTICE 'PASS version 1 immutable and latest v2 returned across database reads';
 
-  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',1,sample1,encode(digest(sample1,'sha256'),'hex'));
+  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',1,sample1,encode(sha256(sample1),'hex'));
   IF r.result_status<>'VERSION_CONFLICT' OR r.new_revision<>2 THEN
     RAISE EXCEPTION 'CAS failure on stale expectedRevision';
   END IF;
@@ -46,7 +46,7 @@ BEGIN
   END;
 
   BEGIN
-    PERFORM * FROM lizhi_cad.save_revision('../escape',0,sample1,encode(digest(sample1,'sha256'),'hex'));
+    PERFORM * FROM lizhi_cad.save_revision('../escape',0,sample1,encode(sha256(sample1),'hex'));
     RAISE EXCEPTION 'path traversal accepted';
   EXCEPTION WHEN SQLSTATE '22023' THEN
     RAISE NOTICE 'PASS path traversal in drawing id rejected';
@@ -70,7 +70,7 @@ BEGIN
   IF (SELECT count(*) FROM lizhi_cad.load_revision('cabinet',NULL))<>0 THEN
     RAISE EXCEPTION 'cross-owner load leaked';
   END IF;
-  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',0,b,encode(digest(b,'sha256'),'hex'));
+  SELECT * INTO r FROM lizhi_cad.save_revision('cabinet',0,b,encode(sha256(b),'hex'));
   IF r.new_revision<>1 THEN RAISE EXCEPTION 'owner B cannot have independent drawing id'; END IF;
   RAISE NOTICE 'PASS RLS isolates owner A and owner B with identical drawing ID';
 END$$;
