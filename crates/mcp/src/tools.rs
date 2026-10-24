@@ -11,21 +11,64 @@ fn lizhi_read_only() -> bool {
     std::env::var("LIZHI_CAD_MCP_READ_ONLY").is_ok_and(|v| v == "1")
 }
 
+/// Restrict a future remote CAD session to native geometric operations only.
+/// This flag is *not* authentication and must never be used as a replacement for
+/// authenticated, per-user isolated sessions and filesystem sandboxes.
+fn lizhi_geometry_only() -> bool {
+    std::env::var("LIZHI_CAD_MCP_GEOMETRY_ONLY").is_ok_and(|v| v == "1")
+}
+
+const LIZHI_MAX_RENDER_SIDE: u64 = 4096;
+
+fn lizhi_render_allowed(args: &Value) -> bool {
+    if args.get("path").is_some_and(|v| !v.is_null()) {
+        return false;
+    }
+    ["width", "height"].into_iter().all(|key| {
+        args.get(key).is_none_or(|value| value.is_null()
+            || value.as_u64().is_some_and(|n| (16..=LIZHI_MAX_RENDER_SIDE).contains(&n)))
+    })
+}
+
+fn lizhi_geometry_command_allowed(command: &str) -> bool {
+    matches!(
+        command,
+        "line" | "circle" | "rectang" | "pline" | "arc"
+            | "layer.new" | "move" | "copy" | "rotate" | "scale"
+            | "erase" | "undo" | "redo" | "zoom"
+    )
+}
+
+/// In geometry-only mode, only native CAD commands with no file/network
+/// capabilities are allowed. The separate storage bridge owns open/save.
+pub(crate) fn lizhi_geometry_tool_allowed(name: &str, args: &Value) -> bool {
+    match name {
+        "list_commands" | "inspect_drawing" | "query_entities" | "find_text" | "new_drawing" => true,
+        "render" => lizhi_render_allowed(args),
+        "execute" => args.get("command").and_then(Value::as_str).is_some_and(lizhi_geometry_command_allowed),
+        _ => false,
+    }
+}
+
 /// Reject all drawing/file mutations in read-only mode. In particular, `render`
 /// accepts a filesystem `path`, so it is read-only only when that path is absent.
 pub(crate) fn lizhi_read_tool_allowed(name: &str, args: &Value) -> bool {
     match name {
         "list_commands" | "inspect_drawing" | "query_entities" | "find_text" => true,
-        "render" => args.get("path").is_none_or(Value::is_null),
+        "render" => lizhi_render_allowed(args),
         _ => false,
     }
 }
 
 pub fn tool_definitions(has_ui: bool) -> Value {
-    tool_definitions_for_scope(has_ui, lizhi_read_only())
+    tool_definitions_for_policy(has_ui, lizhi_read_only(), lizhi_geometry_only())
 }
 
 pub(crate) fn tool_definitions_for_scope(has_ui: bool, read_only: bool) -> Value {
+    tool_definitions_for_policy(has_ui, read_only, false)
+}
+
+pub(crate) fn tool_definitions_for_policy(has_ui: bool, read_only: bool, geometry_only: bool) -> Value {
     let mut tools = vec![
         json!({"name": "command_line", "description": "Type one line at the CADCraft command line, exactly as a user would at an AutoCAD-style prompt. Starts commands by name or alias (LINE, L, CIRCLE, C, PLINE, RECTANG, MOVE, TRIM, OFFSET, ZOOM…) and answers the active prompt: points `x,y`, relative `@dx,dy`, polar `@dist<angle`, distances, keywords (e.g. `c` for Close), empty text = Enter. Spaces act as Enter, so `circle 0,0 5` works in one call. Returns the new prompt and command-line output, and `error` when the line was refused.",
             "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}}),
@@ -60,9 +103,18 @@ pub(crate) fn tool_definitions_for_scope(has_ui: bool, read_only: bool) -> Value
         tools.push(json!({"name": "ui_inspect", "description": "UI state: panels, canvas rect, view, cursor and snap, performance.", "inputSchema": {"type": "object", "properties": {}}}));
         tools.push(json!({"name": "ui_click", "description": "Click in the drawing area at world coordinates (or screen with space:\"screen\"). Right button = Enter.", "inputSchema": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "space": {"type": "string"}, "button": {"type": "string"}}, "required": ["x", "y"]}}));
     }
-    if read_only {
-        tools.retain(|tool| tool["name"].as_str().is_some_and(|name| lizhi_read_tool_allowed(name, &Value::Null)));
-        // Do not advertise a filesystem output parameter to read-only clients.
+    if read_only || geometry_only {
+        // Read-only wins when both flags are set (fail-closed).
+        tools.retain(|tool| tool["name"].as_str().is_some_and(|name| {
+            if read_only {
+                lizhi_read_tool_allowed(name, &Value::Null)
+            } else {
+                // "execute" requires a command argument and is advertised
+                // separately from checking its actual dispatch parameters.
+                name == "execute" || lizhi_geometry_tool_allowed(name, &Value::Null)
+            }
+        }));
+        // File-output "render(path)" is hidden and also rejected at dispatch.
         if let Some(render) = tools.iter_mut().find(|tool| tool["name"] == "render") {
             if let Some(properties) = render["inputSchema"]["properties"].as_object_mut() {
                 properties.remove("path");
@@ -142,6 +194,9 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value,
     // Enforce at dispatch time too: hiding tools from tools/list is not enough.
     if lizhi_read_only() && !lizhi_read_tool_allowed(name, &a) {
         return Err(format!("read-only MCP denies `{name}` or its filesystem output"));
+    }
+    if !lizhi_read_only() && lizhi_geometry_only() && !lizhi_geometry_tool_allowed(name, &a) {
+        return Err(format!("geometry-only MCP denies `{name}` or its parameters"));
     }
     let r = match name {
         "command_line" => b.call("cmdline.input", a),
