@@ -114,11 +114,15 @@ async function run(){
     await a.tool(session1,"execute",{command:"circle",params:{center:[40,30],radius:2}});
     await a.tool(session2,"execute",{command:"circle",params:{center:[50,30],radius:2}});
     const results=await Promise.all([
-      a.tool(session1,"lizhi_save_revision",{expectedRevision:2}),
-      a.tool(session2,"lizhi_save_revision",{expectedRevision:2},true),
+      a.send("tools/call",{name:"lizhi_save_revision",arguments:{expectedRevision:2}},session1),
+      a.send("tools/call",{name:"lizhi_save_revision",arguments:{expectedRevision:2}},session2),
     ]);
-    assert.equal(results[0].revision,3);
-    assert.equal(results[1].error,"VERSION_CONFLICT");
+    const committed=results.filter(r=>r.body.result?.isError!==true);
+    const rejected=results.filter(r=>r.body.result?.isError===true);
+    assert.equal(committed.length,1,"Exactly one concurrent revision should be published");
+    assert.equal(rejected.length,1,"Exactly one concurrent revision should conflict");
+    assert.equal(JSON.parse(committed[0].body.result.content[0].text).revision,3);
+    assert.equal(JSON.parse(rejected[0].body.result.content[0].text).error,"VERSION_CONFLICT");
     ok("Two native CAD sessions cannot overwrite the same committed revision");
 
     await A.close();A=null;
