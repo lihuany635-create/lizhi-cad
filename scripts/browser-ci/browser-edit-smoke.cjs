@@ -58,8 +58,45 @@ async function main(){
     assert.ok(buf.length>250,"Downloaded DXF too small");
     const dxf=buf.toString("utf8");
     assert.ok(/LWPOLYLINE|POLYLINE/.test(dxf),"Downloaded file does not contain a polyline");
+    const pairs=dxf.replace(/\r/g,"").split("\n").reduce((out,line,i,lines)=>{
+      if(i%2===0&&i+1<lines.length)out.push([line.trim(),lines[i+1].trim()]);
+      return out;
+    },[]);
+    const start=pairs.findIndex(([code,value])=>code==="0"&&value==="LWPOLYLINE");
+    assert.ok(start>=0,"Rectangle is not encoded as LWPOLYLINE");
+    const vertices=[];
+    let lastX=null;
+    for(let i=start+1;i<pairs.length;i++){
+      const [code,value]=pairs[i];
+      if(code==="0")break;
+      if(code==="10")lastX=Number(value);
+      if(code==="20"&&lastX!==null){
+        vertices.push([lastX,Number(value)]);
+        lastX=null;
+      }
+    }
+    assert.ok(vertices.length>=4,"Rectangle should contain at least 4 DXF polyline vertices");
+    const xVals=vertices.map(v=>v[0]),yVals=vertices.map(v=>v[1]);
+    const extents={minX:Math.min(...xVals),maxX:Math.max(...xVals),minY:Math.min(...yVals),maxY:Math.max(...yVals)};
+    const approx=(a,b)=>Math.abs(a-b)<0.0001;
+    assert.ok(approx(extents.minX,0)&&approx(extents.maxX,100)&&approx(extents.minY,0)&&approx(extents.maxY,60),
+      "Incorrect actual DXF rectangle coordinates: "+JSON.stringify({extents,vertices}));
+
+    // The browser's own File > Open picker must accept the exact DXF we just saved.
+    const pickerWait=page.waitForEvent("filechooser",{timeout:16000});
+    await page.keyboard.press("Control+o");
+    const picker=await pickerWait;
+    await picker.setFiles(file);
+    await page.waitForTimeout(1100);
+    const reopenDownloadWait=page.waitForEvent("download",{timeout:16000});
+    await page.keyboard.press("Control+s");
+    const reopenDownload=await reopenDownloadWait;
+    const reopenedFile=path.join(out,"edit-reopened-download.dxf");
+    await reopenDownload.saveAs(reopenedFile);
+    const reopened=(await fs.readFile(reopenedFile)).toString("utf8");
+    assert.ok(reopened.includes("LWPOLYLINE"),"Reopened DXF was not preserved");
     assert.deepEqual(errors,[],"JavaScript page errors");
-    const report={kind:"actual-browser-canvas-cad-edit",passed:true,changedPixels:changed,downloadName:download.suggestedFilename(),downloadBytes:buf.length,hasPolyline:true,notDeployed:true,notes:"Real Chromium keyboard CAD commands; DXF download verified with a polyline marker; geometry coordinate exactness needs separate check."};
+    const report={kind:"actual-browser-canvas-cad-edit",passed:true,changedPixels:changed,downloadName:download.suggestedFilename(),downloadBytes:buf.length,hasPolyline:true,rectangleExtents:extents,vertices:vertices.length,reopenedDXFBytes:(await fs.stat(reopenedFile)).size,notDeployed:true,notes:"Real Chromium RECTANG and exact 100x60 DXF geometry; browser File > Open + Ctrl+S re-export."};
     await fs.writeFile(path.join(out,"browser-edit.json"),JSON.stringify(report,null,2));
     console.log("LIZHI_BROWSER_EDIT_SAVE_DXF_PASS",JSON.stringify(report));
     await context.close();
