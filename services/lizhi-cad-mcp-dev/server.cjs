@@ -170,13 +170,19 @@ async function handleVersionTool(session,name,args,store,ownerId){
   }
   throw new StoreError("UNKNOWN_TOOL","Unknown storage tool");
 }
-function createDevServer({cliPath,token,port=0,storeRoot=null,ownerId=null}){
+function createDevServer({cliPath,token,port=0,storeRoot=null,postgresPool=null,ownerId=null}){
   if(!cliPath||!fs.existsSync(cliPath))throw Error("missing source-built CADCraft CLI");
   if(typeof token!=="string"||token.length<32||!/^[a-zA-Z0-9_-]+$/.test(token))throw Error("dev token must be random and >=32 ascii chars");
-  if(storeRoot!==null && (typeof ownerId!=="string"||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(ownerId))) {
+  if(storeRoot!==null && postgresPool!==null)
+    throw new Error("Only one storage backend may be active");
+  if((storeRoot!==null||postgresPool!==null) &&
+    (typeof ownerId!=="string"||!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(ownerId))) {
     throw new Error("store owner must come from verified server configuration");
   }
-  const store=storeRoot?new DrawingStore(storeRoot):null;
+  // Lazy import to avoid requiring pg in the existing local-file-only dev tests.
+  const store=postgresPool?
+    new (require("./postgres/adapter.cjs").PostgresDrawingStore)(postgresPool):
+    (storeRoot?new DrawingStore(storeRoot):null);
   const sessions=new Map();
   const server=http.createServer(async(req,res)=>{
     try{
