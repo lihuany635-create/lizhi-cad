@@ -1,0 +1,73 @@
+name: LiZhi CAD WebAssembly Real Chromium E2E (No Deployment)
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-browser-runtime-e2e.yml'
+      - 'scripts/browser-ci/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: lizhi-browser-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  real-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Get previously SOURCE-BUILT WASM distribution (no public hosting)
+        uses: actions/download-artifact@v4
+        with:
+          name: lizhi-cad-browser-wasm-candidate
+          repository: lihuany635-create/lizhi-cad
+          run-id: 40106567649
+          github-token: ${{ github.token }}
+          path: dist/web
+      - name: Check HTML/JS/WASM assets have been downloaded
+        run: |
+          set -euo pipefail
+          test -s dist/web/index.html
+          test "$(find dist/web -type f -name '*.wasm' | wc -l)" -ge 1
+          test "$(find dist/web -type f -name '*.js' | wc -l)" -ge 1
+          grep -q '立之 CAD' dist/web/index.html
+          find dist/web -maxdepth 2 -type f -printf '%p %s bytes\n'
+      - name: Install Playwright and browser in test-only context
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix scripts/browser-ci --no-save --no-package-lock --no-audit --no-fund playwright@1.56.1 pngjs@7.0.0
+          scripts/browser-ci/node_modules/.bin/playwright install --with-deps chromium
+      - name: Serve local WASM app on loopback, then run real Chromium desktop and mobile
+        shell: bash
+        env:
+          CAD_TEST_ORIGIN: http://127.0.0.1:8771
+          CAD_BROWSER_EVIDENCE: cad-browser-evidence
+        run: |
+          set -euo pipefail
+          python3 -m http.server 8771 --bind 127.0.0.1 --directory dist/web > /tmp/lizhi-cad-http.log 2>&1 &
+          srv=$!
+          trap 'kill "$srv" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8771/ > /dev/null; then break; fi
+            sleep 1
+          done
+          curl --fail --silent --show-error http://127.0.0.1:8771/ > /dev/null
+          node scripts/browser-ci/browser-smoke.cjs
+      - name: Preserve screenshots, errors and JSON proof
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lizhi-cad-real-chromium-web-preview-e2e
+          path: cad-browser-evidence/
+          retention-days: 14
+          if-no-files-found: warn
