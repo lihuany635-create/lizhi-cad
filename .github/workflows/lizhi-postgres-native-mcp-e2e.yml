@@ -1,0 +1,107 @@
+name: LiZhi CAD Source-Built Native MCP with Staging PostgreSQL E2E
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-postgres-native-mcp-e2e.yml'
+      - 'services/lizhi-cad-mcp-dev/postgres/adapter.cjs'
+      - 'services/lizhi-cad-mcp-dev/postgres/001_revision_store_staging.sql'
+      - 'services/lizhi-cad-mcp-dev/server.cjs'
+      - 'services/lizhi-cad-mcp-dev/drawing-store.cjs'
+      - 'services/lizhi-cad-mcp-dev/drawing-mcp-integration-test.cjs'
+      - 'crates/mcp/src/tools.rs'
+      - 'crates/mcp/src/backend.rs'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lizhi-postgres-native-cad-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  postgres-native-cad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_postgres_test_only
+          POSTGRES_DB: cad_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cad_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install PostgreSQL client and fixed Rust toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+          rustc --version
+      - name: Prepare ephemeral postgres RLS schema and least-privileged runtime role
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: '5432'
+          PGDATABASE: cad_ci
+          PGUSER: postgres
+          PGPASSWORD: ci_postgres_test_only
+        run: |
+          set -euo pipefail
+          psql -X -v ON_ERROR_STOP=1 -f services/lizhi-cad-mcp-dev/postgres/001_revision_store_staging.sql
+          psql -X -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE lizhi_cad_ci_app LOGIN PASSWORD 'ci_runtime_test_only' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+          GRANT USAGE ON SCHEMA lizhi_cad TO lizhi_cad_ci_app;
+          GRANT SELECT,INSERT,UPDATE ON lizhi_cad.drawing_heads,lizhi_cad.drawing_revisions TO lizhi_cad_ci_app;
+          GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA lizhi_cad TO lizhi_cad_ci_app;
+          SQL
+      - name: Install test-only PostgreSQL Node driver
+        run: |
+          set -euo pipefail
+          npm install --prefix services/lizhi-cad-mcp-dev --no-save --no-audit --no-fund --no-package-lock pg@8.16.3
+          node --check services/lizhi-cad-mcp-dev/postgres/adapter.cjs
+          node --check services/lizhi-cad-mcp-dev/drawing-mcp-integration-test.cjs
+          node --check services/lizhi-cad-mcp-dev/server.cjs
+      - name: Compile actual LiZhi fork CADCraft CLI from Rust source
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --package cadcraft-cli
+          test -x target/release/cadcraft-cli
+          target/release/cadcraft-cli --version
+      - name: End-to-end real Rust CAD DXF revisions in PostgreSQL across HTTP sessions
+        env:
+          LIZHI_CAD_CI_POSTGRES_URL: postgresql://lizhi_cad_ci_app:ci_runtime_test_only@127.0.0.1:5432/cad_ci
+        run: |
+          set -euo pipefail
+          node services/lizhi-cad-mcp-dev/drawing-mcp-integration-test.cjs "$PWD/target/release/cadcraft-cli" "$PWD/cad-evidence/postgres-native"
+          test -s cad-evidence/postgres-native/drawing-native-mcp-versions.json
+          grep -q '"backend": "postgresql"' cad-evidence/postgres-native/drawing-native-mcp-versions.json || \
+            node -e 'let r=require("./cad-evidence/postgres-native/drawing-native-mcp-versions.json");if(r.backend!=="postgresql"||r.passed!==9)process.exit(1)'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lizhi-cad-native-postgres-stage-e2e
+          path: cad-evidence/postgres-native/
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Safety scope declaration
+        if: always()
+        run: |
+          echo 'This was real source-built native CADCraft + isolated postgres:16, NOT production Supabase, OAuth, or a live ChatGPT endpoint.'
