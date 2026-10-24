@@ -7,6 +7,7 @@ const {spawn}=require("node:child_process");
 const bin=process.argv[2];
 const evidence=process.argv[3]||null;
 const readOnly=process.argv.includes("--readonly");
+const geometryOnly=process.argv.includes("--geometry-only");
 if(!bin)throw Error("Supply path to SOURCE-BUILT cadcraft-cli");
 async function main(){
   const temp=await fs.mkdtemp(path.join(os.tmpdir(),"cadcraft-native-mcp-"));
@@ -14,7 +15,7 @@ async function main(){
   try{
     const pending=new Map();
     let nextId=1,stdout="",stderr="";
-    child=spawn(bin,["mcp"],{stdio:["pipe","pipe","pipe"],shell:false,env:{PATH:process.env.PATH||"",HOME:temp,CADCRAFT_CONFIG_DIR:temp,...(readOnly?{LIZHI_CAD_MCP_READ_ONLY:"1"}:{})}});
+    child=spawn(bin,["mcp"],{stdio:["pipe","pipe","pipe"],shell:false,env:{PATH:process.env.PATH||"",HOME:temp,CADCRAFT_CONFIG_DIR:temp,...(readOnly?{LIZHI_CAD_MCP_READ_ONLY:"1"}:{}),...(geometryOnly?{LIZHI_CAD_MCP_GEOMETRY_ONLY:"1"}:{})}});
     const failAll=(reason)=>{for(const p of pending.values())p.reject(new Error(reason));pending.clear();};
     child.on("error",err=>failAll("CADCraft MCP spawn: "+err.message));
     child.on("close",(code,signal)=>failAll("CADCraft MCP exited: "+code+"/"+signal+" "+stderr.slice(-300)));
@@ -52,6 +53,42 @@ async function main(){
     child.stdin.write(JSON.stringify({jsonrpc:"2.0",method:"notifications/initialized"})+"\n");
     const tools=await rpc("tools/list");
     const names=tools.tools.map(x=>x.name);
+    if(geometryOnly && !readOnly){
+      const allowed=["list_commands","inspect_drawing","query_entities","find_text","render","new_drawing","execute"];
+      assert.deepEqual([...names].sort(), [...allowed].sort(),"Geometry MCP must advertise only safe CAD tools");
+      const denied=[
+        ["command_line",{text:"erase all"}],
+        ["script",{text:"_quit"}],
+        ["save",{path:path.join(temp,"bypass.dxf")}],
+        ["open",{path:"/etc/passwd"}],
+        ["execute",{command:"open",params:{path:"/etc/passwd"}}],
+        ["execute",{command:"saveas",params:{path:"/tmp/bypass.dxf"}}],
+        ["render",{path:path.join(temp,"bypass.png")}],
+        ["render",{width:5000}],
+      ];
+      for(const [name,args] of denied){
+        const r=await send("tools/call",{name,arguments:args});
+        assert.equal(r.error?.code,-32602,"Forbidden CAD request must fail: "+name+" "+JSON.stringify(args));
+      }
+      await tool("new_drawing",{metric:true});
+      await tool("execute",{command:"rectang",params:{p1:[0,0],p2:[100,60]}});
+      await tool("execute",{command:"circle",params:{center:[10,10],radius:5}});
+      const geometry=await tool("query_entities",{limit:10});
+      assert.equal(geometry.count,2,"Geometry-only mode must create real CAD entities");
+      const render=await tool("render",{width:320,height:240});
+      assert.equal(render.type,"image");
+      assert.ok(render.data.length>100);
+      const afterFiles=await fs.readdir(temp);
+      assert.ok(!afterFiles.some(n=>n.startsWith("bypass")),"Geometry-only MCP unexpectedly wrote to file");
+      const proof={mode:"geometry-only",entities:geometry.count,allowedTools:names,blocked:denied.length,renderPngBytes:Buffer.from(render.data,"base64").length,unauthorizedDiskWrites:false};
+      if(evidence){
+        await fs.mkdir(evidence,{recursive:true});
+        await fs.writeFile(path.join(evidence,"native-mcp-geometry-only.json"),JSON.stringify(proof,null,2));
+        await fs.writeFile(path.join(evidence,"native-mcp-geometry-only.png"),Buffer.from(render.data,"base64"));
+      }
+      console.log("LIZHI_NATIVE_MCP_GEOMETRY_ONLY_PASS",JSON.stringify(proof));
+      return;
+    }
     if(readOnly){
       const allowed=["list_commands","inspect_drawing","query_entities","find_text","render"];
       assert.deepEqual([...names].sort(), [...allowed].sort(),"Read-only MCP must advertise exactly the safe tools");
