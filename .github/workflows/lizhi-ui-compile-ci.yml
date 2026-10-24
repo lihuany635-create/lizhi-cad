@@ -1,0 +1,59 @@
+name: LiZhi CAD Fork Desktop and WASM Compile Baseline
+
+on:
+  push:
+    branches:
+      - feature/lizhi-native-mcp-v0120
+    paths:
+      - '.github/workflows/lizhi-ui-compile-ci.yml'
+      - 'apps/cadcraft/**'
+      - 'apps/cadcraft-web/**'
+      - 'crates/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-desktop-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install desktop native build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libudev-dev libasound2-dev libxkbcommon-dev libwayland-dev libgtk-3-dev
+      - name: Rust 1.95.0
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+      - name: Validate fork desktop app compiles
+        run: cargo check --locked --package cadcraft
+
+  webassembly-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Rust 1.95.0 and WASM target
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          rustup override set 1.95.0
+          rustup target add wasm32-unknown-unknown --toolchain 1.95.0
+      - name: Validate browser CADCraft Rust workspace compiles to WASM
+        run: cargo check --locked --package cadcraft-web --target wasm32-unknown-unknown
