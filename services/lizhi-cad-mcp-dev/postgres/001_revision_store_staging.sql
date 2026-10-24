@@ -10,8 +10,6 @@ BEGIN;
 CREATE SCHEMA IF NOT EXISTS lizhi_cad;
 REVOKE ALL ON SCHEMA lizhi_cad FROM PUBLIC;
 
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 CREATE TABLE IF NOT EXISTS lizhi_cad.drawing_heads (
   owner_id text NOT NULL CHECK (owner_id ~ '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$'),
   drawing_id text NOT NULL CHECK (drawing_id ~ '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$'),
@@ -78,7 +76,7 @@ BEGIN
     IF p_dxf IS NULL OR octet_length(p_dxf) < 30 OR octet_length(p_dxf) > 8388608 THEN
       RAISE EXCEPTION 'invalid DXF size' USING ERRCODE='22023';
     END IF;
-    v_sha := encode(digest(p_dxf,'sha256'),'hex');
+    v_sha := encode(sha256(p_dxf),'hex');
     IF p_sha256 IS NULL OR p_sha256 <> v_sha THEN
       RAISE EXCEPTION 'DXF digest mismatch' USING ERRCODE='22023';
     END IF;
