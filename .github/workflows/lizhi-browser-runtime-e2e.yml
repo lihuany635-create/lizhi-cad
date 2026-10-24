@@ -63,6 +63,7 @@ jobs:
           done
           curl --fail --silent --show-error http://127.0.0.1:8771/ > /dev/null
           node scripts/browser-ci/browser-smoke.cjs
+          node scripts/browser-ci/browser-edit-smoke.cjs
       - name: Preserve screenshots, errors and JSON proof
         if: always()
         uses: actions/upload-artifact@v4
