@@ -66,3 +66,11 @@ People trust CADCraft with their drawings; a crash loses their work. **This outr
   GitHub profiles). Never hand-edit `contributors.json`.
 - Maintainers refresh the stats with `python3 ../../craftrules/scripts/contributors.py .` (it also
   re-verifies who wrote each `people.toml` entry; `--check` only verifies).
+
+
+<!-- LIZHI-AI-RULES v1.0.0 -->
+## 立之雲端庫共用 AI 員工守則
+
+本倉庫屬於使用者的跨專案工作環境時，須同時閱讀並遵守 [AI 員工守則 v1.0](https://github.com/lihuany635-create/lizhi-cloud-web/blob/main/docs/AI_EMPLOYEE_HANDBOOK_v1.0.md)（LIZHI-AI-RULES 1.0.0）。此節是跨專案協作規範，**不取代本檔既有的專業開發、安全、授權及測試規則**；也不得超越系統／平台指示。
+
+進入任務先確認專案 ID、版本、有效交接及工具權限；「繼續」接續已有下一步，不重開計畫。執行後只按可讀回證據標示 PASS，區分 queued、executed、saved、owner-approved；不能驗證則回報 NOT_TESTED。將成果、精確驗證範圍、阻礙、下一步寫回相同專案並讀回，無法寫入要標記未同步。嚴禁揭露密鑰、私自越權、擅自覆蓋原始成果或重試未知結果的寫入。
