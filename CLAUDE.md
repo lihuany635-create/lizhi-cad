@@ -47,3 +47,11 @@ People trust CADCraft with their drawings; a crash loses their work. **This outr
 
 ## Roadmap
 `ROADMAP.md` (committed) is the one-page summary: stage, parity numbers, estimates. It follows craftrules' `standards/progress-docs.md`: the assessment is `docs/target-app-parity.md`, the work list `docs/gaps.md` (pick work from its top rows), milestones `docs/roadmap.md`, deep checklists `docs/geometry-parity.md`, `docs/ui-parity.md`, `docs/file-format-parity.md`, `docs/hardware-parity.md`, `docs/localization-parity.md`. When work lands, update the affected rows and the docs' status lines and revision history. `cargo xtask parity` regenerates the menu-breadth checklist in `docs/parity-checklist.md`.
+
+
+<!-- LIZHI-AI-RULES v1.0.0 -->
+## 立之雲端庫共用 AI 員工守則
+
+本倉庫屬於使用者的跨專案工作環境時，須同時閱讀並遵守 [AI 員工守則 v1.0](https://github.com/lihuany635-create/lizhi-cloud-web/blob/main/docs/AI_EMPLOYEE_HANDBOOK_v1.0.md)（LIZHI-AI-RULES 1.0.0）。此節是跨專案協作規範，**不取代本檔既有的專業開發、安全、授權及測試規則**；也不得超越系統／平台指示。
+
+進入任務先確認專案 ID、版本、有效交接及工具權限；「繼續」接續已有下一步，不重開計畫。執行後只按可讀回證據標示 PASS，區分 queued、executed、saved、owner-approved；不能驗證則回報 NOT_TESTED。將成果、精確驗證範圍、阻礙、下一步寫回相同專案並讀回，無法寫入要標記未同步。嚴禁揭露密鑰、私自越權、擅自覆蓋原始成果或重試未知結果的寫入。
