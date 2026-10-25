@@ -135,9 +135,16 @@ impl Bridge {
             {
                 continue;
             }
-            for doc in &mut app.session.docs {
-                let matches = doc.path.as_deref().is_some_and(|p| p == name || p.rsplit(['/', '\\']).next() == Some(name.as_str()));
-                if matches {
+            // A filename alone is not a unique drawing identifier. Never let the ACK
+            // for one tab silently finalize two tabs with the same basename.
+            let candidates: Vec<usize> = app.session.docs.iter().enumerate()
+                .filter(|(_, doc)| doc.save_pending && doc.path.as_deref().is_some_and(
+                    |p| p == name || p.rsplit(['/', '\\']).next() == Some(name.as_str())
+                ))
+                .map(|(index, _)| index)
+                .collect();
+            if let [index] = candidates.as_slice() {
+                if let Some(doc) = app.session.docs.get_mut(*index) {
                     doc.save_pending = false;
                 }
             }
