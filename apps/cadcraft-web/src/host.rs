@@ -55,8 +55,34 @@ fn safe_command(command: &str, params: &serde_json::Value) -> bool {
              && params.as_object().is_some_and(|o| o.len()==2),
         "circle" => params.get("center").is_some() && (params.get("radius").is_some() ^ params.get("diameter").is_some())
              && params.as_object().is_some_and(|o| o.keys().all(|k| k=="center" || k=="radius" || k=="diameter")),
+        // New read-only bridge commands. Never accept a filename, path, script,
+        // arbitrary engine command, or a raw request for the full drawing.
+        "lizhi.inspect" => safe_inspect(params),
+        "lizhi.entities" => safe_entities(params),
         _ => false,
     }
+}
+
+/// Keep the browser-local geometry query bounded before it reaches the engine.
+/// The native engine defaults to 500 entities without a limit, so requiring
+/// a bounded page here is a security boundary, not just a performance hint.
+fn safe_inspect(params: &serde_json::Value) -> bool {
+    params.as_object().is_some_and(serde_json::Map::is_empty)
+}
+fn safe_entities(params: &serde_json::Value) -> bool {
+    let Some(o) = params.as_object() else { return false };
+    if !o.keys().all(|k| matches!(k.as_str(), "type" | "layer" | "limit" | "offset" | "selected")) {
+        return false;
+    }
+    if !o.get("type").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=32 && !x.contains('\\0'))) {
+        return false;
+    }
+    if !o.get("layer").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=80 && !x.contains('\\0'))) {
+        return false;
+    }
+    if !o.get("selected").is_none_or(serde_json::Value::is_boolean) { return false; }
+    if !o.get("limit").is_none_or(|v| v.as_u64().is_some_and(|n| (1..=8).contains(&n))) { return false; }
+    o.get("offset").is_none_or(|v| v.as_u64().is_some_and(|n| n<=10_000))
 }
 
 fn is_point(value: &serde_json::Value) -> bool {
@@ -72,6 +98,7 @@ fn checked_geometry(command: &str, params: &serde_json::Value) -> bool {
         "circle" => params.get("center").is_some_and(is_point)
               && params.get("radius").or_else(||params.get("diameter")).and_then(serde_json::Value::as_f64)
                  .is_some_and(|n| n.is_finite() && n>0.0 && n<=1_000_000.0),
+        "lizhi.inspect" | "lizhi.entities" => true,
         _ => false,
     }
 }
@@ -205,7 +232,11 @@ impl Bridge {
     pub fn run_remote_commands(&self, app: &mut CadApp) {
         let pending: Vec<RemoteCommand> = self.command_queue.borrow_mut().drain(..).collect();
         for req in pending {
-            let answer = app.run(&req.command,req.params);
+            let answer = if req.command=="lizhi.inspect" || req.command=="lizhi.entities" {
+                bounded_read(app,&req.command,&req.params)
+            } else {
+                app.run(&req.command,req.params)
+            };
             let mut parts: Vec<(&str, JsValue)> = vec![
                 ("type", "cadcraft:command-result".into()),
                 ("requestId", req.request_id.into()),
@@ -225,6 +256,61 @@ impl Bridge {
             self.send(&parts);
         }
     }
+
+/// The native CAD engine has a read-only `entities` query and `drawing.inspect`.
+/// Expose only minimal geometric data, not the engine's raw document structure.
+fn bounded_read(app: &mut CadApp, name: &str, input: &serde_json::Value) -> Result<serde_json::Value,String> {
+    let revision = app.session.state().map_err(|e| e.to_string())?.revision;
+    if name=="lizhi.inspect" {
+        let value=app.run("drawing.inspect",serde_json::json!({"entities":false}))?;
+        return Ok(serde_json::json!({
+            "revision": revision,
+            "entityCount":value.get("entityCount"),
+            "counts":value.get("counts"),
+            "extents":value.get("extents"),
+            "space":value.get("space"),
+            "dirty":value.get("dirty"),
+            "currentLayer":value.get("currentLayer"),
+            "selectionCount":value.get("selection").and_then(serde_json::Value::as_array).map(Vec::len).unwrap_or(0),
+        }));
+    }
+    if name!="lizhi.entities" { return Err("unsupported read command".into()); }
+    let mut params = input.clone();
+    if let Some(o)=params.as_object_mut() { o.entry("limit").or_insert(8.into()); }
+    let value=app.run("entities",params)?;
+    let mut result=Vec::new();
+    let mut bytes=0usize;
+    if let Some(entries)=value.get("entities").and_then(serde_json::Value::as_array) {
+        for entity in entries.iter().take(8) {
+            let ty=entity.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+            let lower=ty.to_ascii_lowercase();
+            // Do not return text, blocks, paths, embedded attributes, scripts or
+            // raw complete DXF entities. Other entity types still get handles.
+            let simple=matches!(lower.as_str(), "line"|"circle"|"arc"|"lwpolyline"|"polyline");
+            let geometry=entity.get("geometry").filter(|v| simple && v.to_string().len()<=640).cloned();
+            let row=serde_json::json!({
+                "handle":entity.get("handle"),
+                "type":ty.chars().take(32).collect::<String>(),
+                "layer":entity.get("layer").and_then(serde_json::Value::as_str).unwrap_or("").chars().take(80).collect::<String>(),
+                "geometry":geometry.clone(),
+                "geometryAvailable":geometry.is_some(),
+            });
+            let len=row.to_string().len();
+            if bytes+len>2800 { break; }
+            bytes+=len;
+            result.push(row);
+        }
+    }
+    Ok(serde_json::json!({
+        "revision":revision,
+        "count":value.get("count"),
+        "returned":result.len(),
+        "offset":value.get("offset"),
+        "entities":result,
+        "hasMore":value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0)>
+            value.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0)+result.len() as u64,
+    }))
+}
 
     /// Consume exactly-once verified disk acknowledgements and finalize only their matching
     /// drawing. A failure leaves the engine's DocState.save_pending dirty; another drawing's
@@ -318,5 +404,22 @@ fn byte_array(data: &JsValue) -> Option<js_sys::Uint8Array> {
         Some(js_sys::Uint8Array::new(&bytes))
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod lizhi_entity_bridge_tests {
+    use super::{safe_command,checked_geometry};
+    use serde_json::json;
+    #[test]
+    fn read_commands_are_bounded_and_do_not_allow_file_or_script_access() {
+        assert!(safe_command("lizhi.inspect",&json!({})));
+        assert!(!safe_command("lizhi.inspect",&json!({"entities":true})));
+        assert!(checked_geometry("lizhi.entities",&json!({"type":"Line","limit":8,"offset":10})));
+        assert!(!checked_geometry("lizhi.entities",&json!({"limit":1000})));
+        assert!(!checked_geometry("lizhi.entities",&json!({"path":"/private/diagram.dxf"})));
+        assert!(!checked_geometry("lizhi.entities",&json!({"window":[[-1,-1],[1,1]]})));
+        assert!(!checked_geometry("lizhi.entities",&json!({"selected":"yes"})));
+        assert!(!checked_geometry("execute",&json!({"command":"erase"})));
     }
 }
