@@ -35,6 +35,7 @@ mod web {
             self.0.system_animations = self.3.as_ref().map(|reduced| !reduced.matches());
             self.0.logic(ctx);
             if let Some((bridge, reported)) = &self.2 {
+                bridge.run_remote_commands(&mut self.0);
                 bridge.apply_verified_saves(&mut self.0);
                 bridge.report_dirty(&self.0, reported);
             }
@@ -54,6 +55,7 @@ mod web {
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             self.0.ui(ui);
             if let Some((bridge, reported)) = &self.2 {
+                bridge.run_remote_commands(&mut self.0);
                 bridge.apply_verified_saves(&mut self.0);
                 bridge.report_dirty(&self.0, reported);
             }
