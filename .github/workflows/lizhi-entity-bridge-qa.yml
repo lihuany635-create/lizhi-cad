@@ -1,0 +1,32 @@
+name: LiZhi CAD Native Entity Read Bridge (no deployment)
+on:
+  push:
+    branches: [feature/lizhi-cad-entity-inspect-v1]
+    paths:
+      - 'apps/cadcraft-web/src/host.rs'
+      - '.github/workflows/lizhi-entity-bridge-qa.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  wasm-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUSTFLAGS: '-C debuginfo=0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Rust and WASM target
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal --component rustfmt
+          rustup target add wasm32-unknown-unknown --toolchain 1.95.0
+      - name: Verify Rust syntax and formatting for modified web bridge
+        run: cargo +1.95.0 fmt --all -- --check
+      - name: Compile native CADCraft engine read-only query
+        run: cargo +1.95.0 test --locked --package cadcraft-engine --test query_entities
+      - name: Compile real browser/WASM CADCraft parent bridge
+        run: cargo +1.95.0 check --locked --target wasm32-unknown-unknown --package cadcraft-web
+      - name: No production deployment or external CAD mutation
+        run: echo "WASM compile and engine unit tests only; no Pages/Supabase/Sites deployment"
