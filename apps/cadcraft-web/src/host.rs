@@ -233,7 +233,7 @@ impl Bridge {
         let pending: Vec<RemoteCommand> = self.command_queue.borrow_mut().drain(..).collect();
         for req in pending {
             let answer = if req.command=="lizhi.inspect" || req.command=="lizhi.entities" {
-                bounded_read(app,&req.command,&req.params)
+                Self::bounded_read(app,&req.command,&req.params)
             } else {
                 app.run(&req.command,req.params)
             };
