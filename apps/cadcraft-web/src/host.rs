@@ -7,14 +7,17 @@
 //! - `cadcraft:save` (to the parent): `{ requestId, name, bytes }` (a transferred `ArrayBuffer`) for every
 //!   file CADCraft would otherwise download (SAVE, SAVEAS, exports): it replaces the engine's
 //!   delivery hook. The parent stores the file and reports failures itself.
-//! - `cadcraft:save-ack` (from the parent): `{ requestId, ok }` after verified persistence.\n//!   Pending/failed delivery keeps parent-visible dirty true until a good ACK.\n//! - `cadcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
+//! - `cadcraft:save-ack` (from the parent): `{ requestId, ok }` after verified persistence.\n//!   Pending/failed delivery keeps parent-visible dirty true until a good ACK.\n//! - `cadcraft:command` (from same-origin parent): `{ requestId, command, params }`.
+//!   Only a small static geometry allowlist is executed (no scripts, paths, file I/O or shell).
+//! - `cadcraft:command-result` (to parent): `{ requestId, ok, result? , error? }`.
+//! - `cadcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `cadcraft:failed` (to the parent): `{ error }` when the app couldn't start.
 //!
 //! Only the parent window on the page's own origin is heard or answered. In host mode the app
 //! starts on the Start tab rather than an empty Drawing1, and the parent guards leaving the page.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use cadcraft_ui_egui::CadApp;
@@ -25,10 +28,52 @@ use web_sys::js_sys;
 
 /// Longest file name taken from the parent page.
 const MAX_NAME_CHARS: usize = 255;
+const MAX_REMOTE_PARAMS_CHARS: usize = 8192;
+const MAX_PENDING_COMMANDS: usize = 16;
+const MAX_RECENT_COMMANDS: usize = 512;
 
 thread_local! {
     /// The bridge [`deliver`] posts through (the engine's hook is a plain `fn`).
     static BRIDGE: RefCell<Option<Bridge>> = const { RefCell::new(None) };
+}
+
+
+/// A bounded, same-origin, user-authorized CAD command request, never arbitrary code.
+struct RemoteCommand {
+    request_id: String,
+    command: String,
+    params: serde_json::Value,
+}
+
+fn safe_command(command: &str, params: &serde_json::Value) -> bool {
+    if !params.is_object() { return false; }
+    match command {
+        "new" => params.as_object().is_some_and(|o| o.is_empty() || (o.len()==1 && o.get("metric").is_some_and(serde_json::Value::is_boolean))),
+        "line" => params.get("points").is_some_and(|p| p.as_array().is_some_and(|a| (2..=64).contains(&a.len())))
+             && params.as_object().is_some_and(|o| o.keys().all(|k| k=="points" || k=="closed")),
+        "rectang" => params.get("p1").is_some() && params.get("p2").is_some()
+             && params.as_object().is_some_and(|o| o.len()==2),
+        "circle" => params.get("center").is_some() && (params.get("radius").is_some() ^ params.get("diameter").is_some())
+             && params.as_object().is_some_and(|o| o.keys().all(|k| k=="center" || k=="radius" || k=="diameter")),
+        _ => false,
+    }
+}
+
+fn is_point(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|a| a.len()==2 && a.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs()<=1_000_000.0)))
+}
+fn checked_geometry(command: &str, params: &serde_json::Value) -> bool {
+    if !safe_command(command,params) {return false;}
+    match command {
+        "new" => true,
+        "rectang" => params.get("p1").is_some_and(is_point) && params.get("p2").is_some_and(is_point),
+        "line" => params.get("points").and_then(serde_json::Value::as_array).is_some_and(|a| a.iter().all(is_point))
+             && params.get("closed").is_none_or(serde_json::Value::is_boolean),
+        "circle" => params.get("center").is_some_and(is_point)
+              && params.get("radius").or_else(||params.get("diameter")).and_then(serde_json::Value::as_f64)
+                 .is_some_and(|n| n.is_finite() && n>0.0 && n<=1_000_000.0),
+        _ => false,
+    }
 }
 
 #[derive(Clone)]
@@ -40,6 +85,8 @@ pub struct Bridge {
     failed: Rc<RefCell<HashSet<String>>>,
     verified: Rc<RefCell<Vec<String>>>,
     next_id: Rc<Cell<u64>>,
+    command_queue: Rc<RefCell<VecDeque<RemoteCommand>>>,
+    seen_commands: Rc<RefCell<VecDeque<String>>>,
 }
 
 /// The unsaved-changes state last reported to the parent.
@@ -61,6 +108,8 @@ impl Bridge {
             failed: Rc::default(),
             verified: Rc::default(),
             next_id: Rc::new(Cell::new(0)),
+            command_queue: Rc::default(),
+            seen_commands: Rc::default(),
         })
     }
 
@@ -84,11 +133,38 @@ impl Bridge {
         let pending = self.pending.clone();
         let failed = self.failed.clone();
         let verified = self.verified.clone();
+        let commands = self.command_queue.clone();
+        let seen_commands = self.seen_commands.clone();
         let on_message = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if event.origin() != origin || !event.source().is_some_and(|s| js_sys::Object::is(&s, &parent)) {
                 return;
             }
             let data = event.data();
+            if string(&data, "type").as_deref() == Some("cadcraft:command") {
+                let Some(request_id) = string(&data, "requestId") else {return};
+                let Some(command) = string(&data, "command") else {return};
+                if request_id.len()>96 || request_id.is_empty()
+                    || !request_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+                    || commands.borrow().len()>=MAX_PENDING_COMMANDS
+                {
+                    return;
+                }
+                if seen_commands.borrow().iter().any(|v| v == &request_id) {return;}
+                let Ok(value) = js_sys::Reflect::get(&data, &JsValue::from_str("params")) else {return};
+                let Ok(json) = js_sys::JSON::stringify(&value) else {return};
+                let Some(json) = json.as_string() else {return};
+                if json.len()>MAX_REMOTE_PARAMS_CHARS {return;}
+                let Ok(params) = serde_json::from_str::<serde_json::Value>(&json) else {return};
+                if !checked_geometry(&command,&params) {return;}
+                {
+                    let mut seen = seen_commands.borrow_mut();
+                    seen.push_back(request_id.clone());
+                    if seen.len()>MAX_RECENT_COMMANDS {seen.pop_front();}
+                }
+                commands.borrow_mut().push_back(RemoteCommand {request_id, command, params});
+                ctx.request_repaint();
+                return;
+            }
             if string(&data, "type").as_deref() == Some("cadcraft:save-ack") {
                 let Some(request_id) = string(&data, "requestId") else { return };
                 if let Some(name) = pending.borrow_mut().remove(&request_id) {
@@ -121,6 +197,32 @@ impl Bridge {
         if self.window.add_event_listener_with_callback("message", on_message.as_ref().unchecked_ref()).is_ok() {
             // The listener lives as long as the page.
             on_message.forget();
+        }
+    }
+
+    /// Process validated queued geometry commands only inside the real CAD app's UI event loop.
+    /// Cannot touch arbitrary files, run AutoLISP, scripts, shell, clipboard or JS.
+    pub fn run_remote_commands(&self, app: &mut CadApp) {
+        let pending: Vec<RemoteCommand> = self.command_queue.borrow_mut().drain(..).collect();
+        for req in pending {
+            let answer = app.run(&req.command,req.params);
+            let mut parts: Vec<(&str, JsValue)> = vec![
+                ("type", "cadcraft:command-result".into()),
+                ("requestId", req.request_id.into()),
+                ("ok", answer.is_ok().into()),
+            ];
+            match answer {
+                Ok(value) => {
+                    let json = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
+                    if let Ok(parsed) = js_sys::JSON::parse(&json) {
+                        parts.push(("result",parsed));
+                    }
+                }
+                Err(error) => {
+                    parts.push(("error",error.chars().take(300).collect::<String>().into()));
+                }
+            }
+            self.send(&parts);
         }
     }
 
