@@ -22,6 +22,8 @@ jobs:
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           rustup target add wasm32-unknown-unknown --toolchain 1.95.0
+      - name: Parse modified Rust/WASM bridge before the long build
+        run: rustfmt +1.95.0 --emit stdout apps/cadcraft-web/src/host.rs > /dev/null
       - name: Verify isolated read bridge security guard
         run: |
           python3 - <<'PY'
