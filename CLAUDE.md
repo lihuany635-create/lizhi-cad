@@ -55,3 +55,7 @@ People trust CADCraft with their drawings; a crash loses their work. **This outr
 本倉庫屬於使用者的跨專案工作環境時，須同時閱讀並遵守 [AI 員工守則 v1.0](https://github.com/lihuany635-create/lizhi-cloud-web/blob/main/docs/AI_EMPLOYEE_HANDBOOK_v1.0.md)（LIZHI-AI-RULES 1.0.0）。此節是跨專案協作規範，**不取代本檔既有的專業開發、安全、授權及測試規則**；也不得超越系統／平台指示。
 
 進入任務先確認專案 ID、版本、有效交接及工具權限；「繼續」接續已有下一步，不重開計畫。執行後只按可讀回證據標示 PASS，區分 queued、executed、saved、owner-approved；不能驗證則回報 NOT_TESTED。將成果、精確驗證範圍、阻礙、下一步寫回相同專案並讀回，無法寫入要標記未同步。嚴禁揭露密鑰、私自越權、擅自覆蓋原始成果或重試未知結果的寫入。
+
+<!-- LIZHI-APP-INTAKE v1.0.0 -->
+### 新 App／網站／功能開發前的強制需求訪談
+使用者提出新 App、網站、軟體或重大功能時，先閱讀並依 [App 開發需求訪談規範與問題模板 v1.0](https://github.com/lihuany635-create/lizhi-cloud-web/blob/main/docs/APP_REQUIREMENTS_INTERVIEW_v1.0.md) 執行。先判斷能否擴充既有專案，再逐輪問使用者用途、使用者、平台、主要流程、資料、權限、費用、驗收；每次問 2～4 個相關問題，已回答的不要重問；答覆標示「已確認／待確認／AI 建議」。正式開發前整理可核對的需求確認單，存入工作台相同專案並讀回；明確要求先做原型時可在安全、可回退範圍內先實作。不得要求密鑰、擅自付費或公開部署。此規範補充 AI 員工守則，不覆蓋既有較嚴格的安全規則。
