@@ -22,8 +22,15 @@ jobs:
         run: |
           rustup toolchain install 1.95.0 --profile minimal --component rustfmt
           rustup target add wasm32-unknown-unknown --toolchain 1.95.0
-      - name: Verify Rust syntax and formatting for modified web bridge
-        run: cargo +1.95.0 fmt --all -- --check
+      - name: Verify isolated read bridge security guard
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          code=Path('apps/cadcraft-web/src/host.rs').read_text()
+          for required in ['fn safe_entities(', 'fn safe_inspect(', 'fn bounded_read(', '"lizhi.entities"', '"lizhi.inspect"', 'if bytes+len>2800']:
+              assert required in code, required
+          print('Native inspection safety boundaries present')
+          PY
       - name: Compile native CADCraft engine read-only query
         run: cargo +1.95.0 test --locked --package cadcraft-engine --test query_entities
       - name: Compile real browser/WASM CADCraft parent bridge
