@@ -59,6 +59,7 @@ fn safe_command(command: &str, params: &serde_json::Value) -> bool {
         // arbitrary engine command, or a raw request for the full drawing.
         "lizhi.inspect" => safe_inspect(params),
         "lizhi.entities" => safe_entities(params),
+        "lizhi.move" => safe_move(params),
         _ => false,
     }
 }
@@ -85,6 +86,20 @@ fn safe_entities(params: &serde_json::Value) -> bool {
     o.get("offset").is_none_or(|v| v.as_u64().is_some_and(|n| n<=10_000))
 }
 
+/// One selected entity only, bounded delta and stale-revision protection.
+/// The parent must additionally request a real browser user confirmation.
+fn safe_move(params: &serde_json::Value) -> bool {
+    let Some(o)=params.as_object() else { return false };
+    if o.len()!=4 || !o.keys().all(|k| matches!(k.as_str(), "handles"|"delta"|"expectedRevision"|"confirmed")) { return false; }
+    if o.get("confirmed").and_then(serde_json::Value::as_bool)!=Some(true) { return false; }
+    if o.get("expectedRevision").and_then(serde_json::Value::as_u64).is_none() { return false; }
+    let Some(handles)=o.get("handles").and_then(serde_json::Value::as_array) else { return false };
+    if handles.len()!=1 || !handles.iter().all(|x| x.as_str().is_some_and(|h| !h.is_empty() && h.len()<=16 && h.bytes().all(|c| c.is_ascii_hexdigit()))) { return false; }
+    let Some(delta)=o.get("delta") else { return false };
+    if !is_point(delta) { return false; }
+    delta.as_array().is_some_and(|a| a.iter().any(|n| n.as_f64().is_some_and(|v| v!=0.0)))
+}
+
 fn is_point(value: &serde_json::Value) -> bool {
     value.as_array().is_some_and(|a| a.len()==2 && a.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs()<=1_000_000.0)))
 }
@@ -98,7 +113,7 @@ fn checked_geometry(command: &str, params: &serde_json::Value) -> bool {
         "circle" => params.get("center").is_some_and(is_point)
               && params.get("radius").or_else(||params.get("diameter")).and_then(serde_json::Value::as_f64)
                  .is_some_and(|n| n.is_finite() && n>0.0 && n<=1_000_000.0),
-        "lizhi.inspect" | "lizhi.entities" => true,
+        "lizhi.inspect" | "lizhi.entities" | "lizhi.move" => true,
         _ => false,
     }
 }
@@ -234,6 +249,8 @@ impl Bridge {
         for req in pending {
             let answer = if req.command=="lizhi.inspect" || req.command=="lizhi.entities" {
                 Self::bounded_read(app,&req.command,&req.params)
+            } else if req.command=="lizhi.move" {
+                Self::bounded_move(app,&req.params)
             } else {
                 app.run(&req.command,req.params)
             };
@@ -256,6 +273,22 @@ impl Bridge {
             self.send(&parts);
         }
     }
+
+/// Refuse stale handles after any human drawing change: no blind AI edits.
+/// This is native-only and not accessible through Sites or Supabase until review.
+fn bounded_move(app: &mut CadApp, input: &serde_json::Value) -> Result<serde_json::Value,String> {
+    if !safe_move(input) { return Err("invalid bounded move".into()); }
+    let expected=input.get("expectedRevision").and_then(serde_json::Value::as_u64).ok_or("missing revision")?;
+    let before=app.session.state().map_err(|e| e.to_string())?.revision;
+    if before!=expected { return Err("CAD_REVISION_CONFLICT: inspect the drawing again".into()); }
+    let args=serde_json::json!({"handles":input.get("handles"),"delta":input.get("delta")});
+    let outcome=app.run("move",args)?;
+    if outcome.get("moved").and_then(serde_json::Value::as_u64)!=Some(1) {
+        return Err("CAD_MOVE_NOT_CONFIRMED: inspect the drawing before another edit".into());
+    }
+    let after=app.session.state().map_err(|e| e.to_string())?.revision;
+    Ok(serde_json::json!({"moved":1,"revisionBefore":before,"revisionAfter":after,"completed":true}))
+}
 
 /// The native CAD engine has a read-only `entities` query and `drawing.inspect`.
 /// Expose only minimal geometric data, not the engine's raw document structure.
@@ -421,5 +454,10 @@ mod lizhi_entity_bridge_tests {
         assert!(!checked_geometry("lizhi.entities",&json!({"window":[[-1,-1],[1,1]]})));
         assert!(!checked_geometry("lizhi.entities",&json!({"selected":"yes"})));
         assert!(!checked_geometry("execute",&json!({"command":"erase"})));
+        let move_ok=json!({"handles":["1A"],"delta":[100,0],"expectedRevision":3,"confirmed":true});
+        assert!(checked_geometry("lizhi.move",&move_ok));
+        assert!(!checked_geometry("lizhi.move",&json!({"handles":["1A"],"delta":[100,0],"confirmed":true})));
+        assert!(!checked_geometry("lizhi.move",&json!({"handles":["1A","2B"],"delta":[100,0],"expectedRevision":3,"confirmed":true})));
+        assert!(!checked_geometry("lizhi.move",&json!({"handles":["1A"],"delta":[100,0],"expectedRevision":3,"confirmed":false})));
     }
 }
