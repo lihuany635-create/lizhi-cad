@@ -74,10 +74,10 @@ fn safe_entities(params: &serde_json::Value) -> bool {
     if !o.keys().all(|k| matches!(k.as_str(), "type" | "layer" | "limit" | "offset" | "selected")) {
         return false;
     }
-    if !o.get("type").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=32 && !x.contains('\\0'))) {
+    if !o.get("type").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=32 && !x.contains(char::from(0)))) {
         return false;
     }
-    if !o.get("layer").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=80 && !x.contains('\\0'))) {
+    if !o.get("layer").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=80 && !x.contains(char::from(0)))) {
         return false;
     }
     if !o.get("selected").is_none_or(serde_json::Value::is_boolean) { return false; }
