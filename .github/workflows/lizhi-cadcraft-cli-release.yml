@@ -1,0 +1,44 @@
+# Builds the headless cadcraft-cli for the 立之 CAD cloud worker and publishes it as the
+# `lizhi-cadcraft-cli` release asset (overwritten on every build).
+# Manual only: publishing the release is an explicit step at go-live.
+name: lizhi cadcraft-cli build
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: lizhi-cadcraft-cli-release
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lizhi-cadcraft-cli
+      - name: Build cadcraft-cli (release)
+        run: cargo build --release -p cadcraft-cli --locked
+      - name: Smoke test headless MCP drawing, render and DXF save
+        run: |
+          B=target/release/cadcraft-cli
+          printf '%s\n' \
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"1"}}}' \
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+            '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"command_line","arguments":{"text":"rectang 0,0 100,60"}}}' \
+            '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"render","arguments":{"width":64,"height":64}}}' \
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"save\",\"arguments\":{\"path\":\"$PWD/ci.dxf\"}}}" \
+            | timeout 60 $B mcp > out.jsonl
+          grep -q '"type":"image"' out.jsonl
+          test -s ci.dxf
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp target/release/cadcraft-cli cadcraft-cli-linux-x64
+          gh release view lizhi-cadcraft-cli >/dev/null 2>&1 || \
+            gh release create lizhi-cadcraft-cli --prerelease --title "lizhi cadcraft-cli (cloud worker)" \
+              --notes "Headless cadcraft-cli for the 立之 CAD cloud worker. Rebuilt on demand."
+          gh release upload lizhi-cadcraft-cli cadcraft-cli-linux-x64 --clobber
