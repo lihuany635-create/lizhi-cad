@@ -13,6 +13,7 @@
 pub mod download;
 #[cfg(target_arch = "wasm32")]
 mod host;
+mod lizhi_call;
 
 #[cfg(target_arch = "wasm32")]
 mod web {

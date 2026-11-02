@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 cadcraft-engine = { workspace = true }
 cadcraft-ui-egui = { workspace = true }
+cadcraft-render = { workspace = true }
 cadcraft-io = { workspace = true }
 egui = { workspace = true }
 log = { workspace = true }

@@ -8,7 +8,9 @@
 //!   file CADCraft would otherwise download (SAVE, SAVEAS, exports): it replaces the engine's
 //!   delivery hook. The parent stores the file and reports failures itself.
 //! - `cadcraft:save-ack` (from the parent): `{ requestId, ok }` after verified persistence.\n//!   Pending/failed delivery keeps parent-visible dirty true until a good ACK.\n//! - `cadcraft:command` (from same-origin parent): `{ requestId, command, params }`.
-//!   Only a small static geometry allowlist is executed (no scripts, paths, file I/O or shell).
+//!   Geometry commands, bounded reads and `lizhi.call` (see `lizhi_call.rs`: the full command
+//!   surface minus file paths, file/program loading and drawing replacement; destructive commands
+//!   need `confirmed`).
 //! - `cadcraft:command-result` (to parent): `{ requestId, ok, result? , error? }`.
 //! - `cadcraft:dirty` (to the parent): `{ dirty }` whenever unsaved changes appear or go away.
 //! - `cadcraft:failed` (to the parent): `{ error }` when the app couldn't start.
@@ -28,7 +30,7 @@ use web_sys::js_sys;
 
 /// Longest file name taken from the parent page.
 const MAX_NAME_CHARS: usize = 255;
-const MAX_REMOTE_PARAMS_CHARS: usize = 8192;
+const MAX_REMOTE_PARAMS_CHARS: usize = 32768;
 const MAX_PENDING_COMMANDS: usize = 16;
 const MAX_RECENT_COMMANDS: usize = 512;
 
@@ -36,7 +38,6 @@ thread_local! {
     /// The bridge [`deliver`] posts through (the engine's hook is a plain `fn`).
     static BRIDGE: RefCell<Option<Bridge>> = const { RefCell::new(None) };
 }
-
 
 /// A bounded, same-origin, user-authorized CAD command request, never arbitrary code.
 struct RemoteCommand {
@@ -46,20 +47,27 @@ struct RemoteCommand {
 }
 
 fn safe_command(command: &str, params: &serde_json::Value) -> bool {
-    if !params.is_object() { return false; }
+    if !params.is_object() {
+        return false;
+    }
     match command {
-        "new" => params.as_object().is_some_and(|o| o.is_empty() || (o.len()==1 && o.get("metric").is_some_and(serde_json::Value::is_boolean))),
-        "line" => params.get("points").is_some_and(|p| p.as_array().is_some_and(|a| (2..=64).contains(&a.len())))
-             && params.as_object().is_some_and(|o| o.keys().all(|k| k=="points" || k=="closed")),
-        "rectang" => params.get("p1").is_some() && params.get("p2").is_some()
-             && params.as_object().is_some_and(|o| o.len()==2),
-        "circle" => params.get("center").is_some() && (params.get("radius").is_some() ^ params.get("diameter").is_some())
-             && params.as_object().is_some_and(|o| o.keys().all(|k| k=="center" || k=="radius" || k=="diameter")),
+        "new" => params.as_object().is_some_and(|o| o.is_empty() || (o.len() == 1 && o.get("metric").is_some_and(serde_json::Value::is_boolean))),
+        "line" => {
+            params.get("points").is_some_and(|p| p.as_array().is_some_and(|a| (2..=64).contains(&a.len())))
+                && params.as_object().is_some_and(|o| o.keys().all(|k| k == "points" || k == "closed"))
+        }
+        "rectang" => params.get("p1").is_some() && params.get("p2").is_some() && params.as_object().is_some_and(|o| o.len() == 2),
+        "circle" => {
+            params.get("center").is_some()
+                && (params.get("radius").is_some() ^ params.get("diameter").is_some())
+                && params.as_object().is_some_and(|o| o.keys().all(|k| k == "center" || k == "radius" || k == "diameter"))
+        }
         // New read-only bridge commands. Never accept a filename, path, script,
         // arbitrary engine command, or a raw request for the full drawing.
         "lizhi.inspect" => safe_inspect(params),
         "lizhi.entities" => safe_entities(params),
         "lizhi.move" => safe_move(params),
+        "lizhi.call" => crate::lizhi_call::safe_call(params),
         _ => false,
     }
 }
@@ -75,45 +83,70 @@ fn safe_entities(params: &serde_json::Value) -> bool {
     if !o.keys().all(|k| matches!(k.as_str(), "type" | "layer" | "limit" | "offset" | "selected")) {
         return false;
     }
-    if !o.get("type").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=32 && !x.contains(char::from(0)))) {
+    if !o.get("type").is_none_or(|v| v.as_str().is_some_and(|x| x.len() <= 32 && !x.contains(char::from(0)))) {
         return false;
     }
-    if !o.get("layer").is_none_or(|v| v.as_str().is_some_and(|x| x.len()<=80 && !x.contains(char::from(0)))) {
+    if !o.get("layer").is_none_or(|v| v.as_str().is_some_and(|x| x.len() <= 80 && !x.contains(char::from(0)))) {
         return false;
     }
-    if !o.get("selected").is_none_or(serde_json::Value::is_boolean) { return false; }
-    if !o.get("limit").is_none_or(|v| v.as_u64().is_some_and(|n| (1..=8).contains(&n))) { return false; }
-    o.get("offset").is_none_or(|v| v.as_u64().is_some_and(|n| n<=10_000))
+    if !o.get("selected").is_none_or(serde_json::Value::is_boolean) {
+        return false;
+    }
+    if !o.get("limit").is_none_or(|v| v.as_u64().is_some_and(|n| (1..=8).contains(&n))) {
+        return false;
+    }
+    o.get("offset").is_none_or(|v| v.as_u64().is_some_and(|n| n <= 10_000))
 }
 
 /// One selected entity only, bounded delta and stale-revision protection.
 /// The parent must additionally request a real browser user confirmation.
 fn safe_move(params: &serde_json::Value) -> bool {
-    let Some(o)=params.as_object() else { return false };
-    if o.len()!=4 || !o.keys().all(|k| matches!(k.as_str(), "handles"|"delta"|"expectedRevision"|"confirmed")) { return false; }
-    if o.get("confirmed").and_then(serde_json::Value::as_bool)!=Some(true) { return false; }
-    if o.get("expectedRevision").and_then(serde_json::Value::as_u64).is_none() { return false; }
-    let Some(handles)=o.get("handles").and_then(serde_json::Value::as_array) else { return false };
-    if handles.len()!=1 || !handles.iter().all(|x| x.as_str().is_some_and(|h| !h.is_empty() && h.len()<=16 && h.bytes().all(|c| c.is_ascii_hexdigit()))) { return false; }
-    let Some(delta)=o.get("delta") else { return false };
-    if !is_point(delta) { return false; }
-    delta.as_array().is_some_and(|a| a.iter().any(|n| n.as_f64().is_some_and(|v| v!=0.0)))
+    let Some(o) = params.as_object() else { return false };
+    if o.len() != 4 || !o.keys().all(|k| matches!(k.as_str(), "handles" | "delta" | "expectedRevision" | "confirmed")) {
+        return false;
+    }
+    if o.get("confirmed").and_then(serde_json::Value::as_bool) != Some(true) {
+        return false;
+    }
+    if o.get("expectedRevision").and_then(serde_json::Value::as_u64).is_none() {
+        return false;
+    }
+    let Some(handles) = o.get("handles").and_then(serde_json::Value::as_array) else { return false };
+    if handles.len() != 1
+        || !handles.iter().all(|x| x.as_str().is_some_and(|h| !h.is_empty() && h.len() <= 16 && h.bytes().all(|c| c.is_ascii_hexdigit())))
+    {
+        return false;
+    }
+    let Some(delta) = o.get("delta") else { return false };
+    if !is_point(delta) {
+        return false;
+    }
+    delta.as_array().is_some_and(|a| a.iter().any(|n| n.as_f64().is_some_and(|v| v != 0.0)))
 }
 
 fn is_point(value: &serde_json::Value) -> bool {
-    value.as_array().is_some_and(|a| a.len()==2 && a.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs()<=1_000_000.0)))
+    value.as_array().is_some_and(|a| a.len() == 2 && a.iter().all(|x| x.as_f64().is_some_and(|n| n.is_finite() && n.abs() <= 1_000_000.0)))
 }
 fn checked_geometry(command: &str, params: &serde_json::Value) -> bool {
-    if !safe_command(command,params) {return false;}
+    if !safe_command(command, params) {
+        return false;
+    }
     match command {
         "new" => true,
         "rectang" => params.get("p1").is_some_and(is_point) && params.get("p2").is_some_and(is_point),
-        "line" => params.get("points").and_then(serde_json::Value::as_array).is_some_and(|a| a.iter().all(is_point))
-             && params.get("closed").is_none_or(serde_json::Value::is_boolean),
-        "circle" => params.get("center").is_some_and(is_point)
-              && params.get("radius").or_else(||params.get("diameter")).and_then(serde_json::Value::as_f64)
-                 .is_some_and(|n| n.is_finite() && n>0.0 && n<=1_000_000.0),
-        "lizhi.inspect" | "lizhi.entities" | "lizhi.move" => true,
+        "line" => {
+            params.get("points").and_then(serde_json::Value::as_array).is_some_and(|a| a.iter().all(is_point))
+                && params.get("closed").is_none_or(serde_json::Value::is_boolean)
+        }
+        "circle" => {
+            params.get("center").is_some_and(is_point)
+                && params
+                    .get("radius")
+                    .or_else(|| params.get("diameter"))
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|n| n.is_finite() && n > 0.0 && n <= 1_000_000.0)
+        }
+        "lizhi.inspect" | "lizhi.entities" | "lizhi.move" | "lizhi.call" => true,
         _ => false,
     }
 }
@@ -145,7 +178,9 @@ impl Bridge {
         }
         let origin = window.location().origin().ok()?;
         Some(Self {
-            window, parent, origin,
+            window,
+            parent,
+            origin,
             pending: Rc::default(),
             failed: Rc::default(),
             verified: Rc::default(),
@@ -183,27 +218,36 @@ impl Bridge {
             }
             let data = event.data();
             if string(&data, "type").as_deref() == Some("cadcraft:command") {
-                let Some(request_id) = string(&data, "requestId") else {return};
-                let Some(command) = string(&data, "command") else {return};
-                if request_id.len()>96 || request_id.is_empty()
+                let Some(request_id) = string(&data, "requestId") else { return };
+                let Some(command) = string(&data, "command") else { return };
+                if request_id.len() > 96
+                    || request_id.is_empty()
                     || !request_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-                    || commands.borrow().len()>=MAX_PENDING_COMMANDS
+                    || commands.borrow().len() >= MAX_PENDING_COMMANDS
                 {
                     return;
                 }
-                if seen_commands.borrow().iter().any(|v| v == &request_id) {return;}
-                let Ok(value) = js_sys::Reflect::get(&data, &JsValue::from_str("params")) else {return};
-                let Ok(json) = js_sys::JSON::stringify(&value) else {return};
-                let Some(json) = json.as_string() else {return};
-                if json.len()>MAX_REMOTE_PARAMS_CHARS {return;}
-                let Ok(params) = serde_json::from_str::<serde_json::Value>(&json) else {return};
-                if !checked_geometry(&command,&params) {return;}
+                if seen_commands.borrow().iter().any(|v| v == &request_id) {
+                    return;
+                }
+                let Ok(value) = js_sys::Reflect::get(&data, &JsValue::from_str("params")) else { return };
+                let Ok(json) = js_sys::JSON::stringify(&value) else { return };
+                let Some(json) = json.as_string() else { return };
+                if json.len() > MAX_REMOTE_PARAMS_CHARS {
+                    return;
+                }
+                let Ok(params) = serde_json::from_str::<serde_json::Value>(&json) else { return };
+                if !checked_geometry(&command, &params) {
+                    return;
+                }
                 {
                     let mut seen = seen_commands.borrow_mut();
                     seen.push_back(request_id.clone());
-                    if seen.len()>MAX_RECENT_COMMANDS {seen.pop_front();}
+                    if seen.len() > MAX_RECENT_COMMANDS {
+                        seen.pop_front();
+                    }
                 }
-                commands.borrow_mut().push_back(RemoteCommand {request_id, command, params});
+                commands.borrow_mut().push_back(RemoteCommand { request_id, command, params });
                 ctx.request_repaint();
                 return;
             }
@@ -247,103 +291,112 @@ impl Bridge {
     pub fn run_remote_commands(&self, app: &mut CadApp) {
         let pending: Vec<RemoteCommand> = self.command_queue.borrow_mut().drain(..).collect();
         for req in pending {
-            let answer = if req.command=="lizhi.inspect" || req.command=="lizhi.entities" {
-                Self::bounded_read(app,&req.command,&req.params)
-            } else if req.command=="lizhi.move" {
-                Self::bounded_move(app,&req.params)
+            let answer = if req.command == "lizhi.inspect" || req.command == "lizhi.entities" {
+                Self::bounded_read(app, &req.command, &req.params)
+            } else if req.command == "lizhi.move" {
+                Self::bounded_move(app, &req.params)
+            } else if req.command == "lizhi.call" {
+                crate::lizhi_call::run(app, &req.params)
             } else {
-                app.run(&req.command,req.params)
+                app.run(&req.command, req.params)
             };
-            let mut parts: Vec<(&str, JsValue)> = vec![
-                ("type", "cadcraft:command-result".into()),
-                ("requestId", req.request_id.into()),
-                ("ok", answer.is_ok().into()),
-            ];
+            let mut parts: Vec<(&str, JsValue)> =
+                vec![("type", "cadcraft:command-result".into()), ("requestId", req.request_id.into()), ("ok", answer.is_ok().into())];
             match answer {
                 Ok(value) => {
                     let json = serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string());
                     if let Ok(parsed) = js_sys::JSON::parse(&json) {
-                        parts.push(("result",parsed));
+                        parts.push(("result", parsed));
                     }
                 }
                 Err(error) => {
-                    parts.push(("error",error.chars().take(300).collect::<String>().into()));
+                    parts.push(("error", error.chars().take(300).collect::<String>().into()));
                 }
             }
             self.send(&parts);
         }
     }
 
-/// Refuse stale handles after any human drawing change: no blind AI edits.
-/// This is native-only and not accessible through Sites or Supabase until review.
-fn bounded_move(app: &mut CadApp, input: &serde_json::Value) -> Result<serde_json::Value,String> {
-    if !safe_move(input) { return Err("invalid bounded move".into()); }
-    let expected=input.get("expectedRevision").and_then(serde_json::Value::as_u64).ok_or("missing revision")?;
-    let before=app.session.state().map_err(|e| e.to_string())?.revision;
-    if before!=expected { return Err("CAD_REVISION_CONFLICT: inspect the drawing again".into()); }
-    let args=serde_json::json!({"handles":input.get("handles"),"delta":input.get("delta")});
-    let outcome=app.run("move",args)?;
-    if outcome.get("moved").and_then(serde_json::Value::as_u64)!=Some(1) {
-        return Err("CAD_MOVE_NOT_CONFIRMED: inspect the drawing before another edit".into());
-    }
-    let after=app.session.state().map_err(|e| e.to_string())?.revision;
-    Ok(serde_json::json!({"moved":1,"revisionBefore":before,"revisionAfter":after,"completed":true}))
-}
-
-/// The native CAD engine has a read-only `entities` query and `drawing.inspect`.
-/// Expose only minimal geometric data, not the engine's raw document structure.
-fn bounded_read(app: &mut CadApp, name: &str, input: &serde_json::Value) -> Result<serde_json::Value,String> {
-    let revision = app.session.state().map_err(|e| e.to_string())?.revision;
-    if name=="lizhi.inspect" {
-        let value=app.run("drawing.inspect",serde_json::json!({"entities":false}))?;
-        return Ok(serde_json::json!({
-            "revision": revision,
-            "entityCount":value.get("entityCount"),
-            "counts":value.get("counts"),
-            "extents":value.get("extents"),
-            "space":value.get("space"),
-            "dirty":value.get("dirty"),
-            "currentLayer":value.get("currentLayer"),
-            "selectionCount":value.get("selection").and_then(serde_json::Value::as_array).map(Vec::len).unwrap_or(0),
-        }));
-    }
-    if name!="lizhi.entities" { return Err("unsupported read command".into()); }
-    let mut params = input.clone();
-    if let Some(o)=params.as_object_mut() { o.entry("limit").or_insert(8.into()); }
-    let value=app.run("entities",params)?;
-    let mut result=Vec::new();
-    let mut bytes=0usize;
-    if let Some(entries)=value.get("entities").and_then(serde_json::Value::as_array) {
-        for entity in entries.iter().take(8) {
-            let ty=entity.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
-            let lower=ty.to_ascii_lowercase();
-            // Do not return text, blocks, paths, embedded attributes, scripts or
-            // raw complete DXF entities. Other entity types still get handles.
-            let simple=matches!(lower.as_str(), "line"|"circle"|"arc"|"lwpolyline"|"polyline");
-            let geometry=entity.get("geometry").filter(|v| simple && v.to_string().len()<=640).cloned();
-            let row=serde_json::json!({
-                "handle":entity.get("handle"),
-                "type":ty.chars().take(32).collect::<String>(),
-                "layer":entity.get("layer").and_then(serde_json::Value::as_str).unwrap_or("").chars().take(80).collect::<String>(),
-                "geometry":geometry.clone(),
-                "geometryAvailable":geometry.is_some(),
-            });
-            let len=row.to_string().len();
-            if bytes+len>2800 { break; }
-            bytes+=len;
-            result.push(row);
+    /// Refuse stale handles after any human drawing change: no blind AI edits.
+    /// This is native-only and not accessible through Sites or Supabase until review.
+    fn bounded_move(app: &mut CadApp, input: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if !safe_move(input) {
+            return Err("invalid bounded move".into());
         }
+        let expected = input.get("expectedRevision").and_then(serde_json::Value::as_u64).ok_or("missing revision")?;
+        let before = app.session.state().map_err(|e| e.to_string())?.revision;
+        if before != expected {
+            return Err("CAD_REVISION_CONFLICT: inspect the drawing again".into());
+        }
+        let args = serde_json::json!({"handles":input.get("handles"),"delta":input.get("delta")});
+        let outcome = app.run("move", args)?;
+        if outcome.get("moved").and_then(serde_json::Value::as_u64) != Some(1) {
+            return Err("CAD_MOVE_NOT_CONFIRMED: inspect the drawing before another edit".into());
+        }
+        let after = app.session.state().map_err(|e| e.to_string())?.revision;
+        Ok(serde_json::json!({"moved":1,"revisionBefore":before,"revisionAfter":after,"completed":true}))
     }
-    Ok(serde_json::json!({
-        "revision":revision,
-        "count":value.get("count"),
-        "returned":result.len(),
-        "offset":value.get("offset"),
-        "entities":result,
-        "hasMore":value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0)>
-            value.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0)+result.len() as u64,
-    }))
-}
+
+    /// The native CAD engine has a read-only `entities` query and `drawing.inspect`.
+    /// Expose only minimal geometric data, not the engine's raw document structure.
+    fn bounded_read(app: &mut CadApp, name: &str, input: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let revision = app.session.state().map_err(|e| e.to_string())?.revision;
+        if name == "lizhi.inspect" {
+            let value = app.run("drawing.inspect", serde_json::json!({"entities":false}))?;
+            return Ok(serde_json::json!({
+                "revision": revision,
+                "entityCount":value.get("entityCount"),
+                "counts":value.get("counts"),
+                "extents":value.get("extents"),
+                "space":value.get("space"),
+                "dirty":value.get("dirty"),
+                "currentLayer":value.get("currentLayer"),
+                "selectionCount":value.get("selection").and_then(serde_json::Value::as_array).map(Vec::len).unwrap_or(0),
+            }));
+        }
+        if name != "lizhi.entities" {
+            return Err("unsupported read command".into());
+        }
+        let mut params = input.clone();
+        if let Some(o) = params.as_object_mut() {
+            o.entry("limit").or_insert(8.into());
+        }
+        let value = app.run("entities", params)?;
+        let mut result = Vec::new();
+        let mut bytes = 0usize;
+        if let Some(entries) = value.get("entities").and_then(serde_json::Value::as_array) {
+            for entity in entries.iter().take(8) {
+                let ty = entity.get("type").and_then(serde_json::Value::as_str).unwrap_or("");
+                let lower = ty.to_ascii_lowercase();
+                // Do not return text, blocks, paths, embedded attributes, scripts or
+                // raw complete DXF entities. Other entity types still get handles.
+                let simple = matches!(lower.as_str(), "line" | "circle" | "arc" | "lwpolyline" | "polyline");
+                let geometry = entity.get("geometry").filter(|v| simple && v.to_string().len() <= 640).cloned();
+                let row = serde_json::json!({
+                    "handle":entity.get("handle"),
+                    "type":ty.chars().take(32).collect::<String>(),
+                    "layer":entity.get("layer").and_then(serde_json::Value::as_str).unwrap_or("").chars().take(80).collect::<String>(),
+                    "geometry":geometry.clone(),
+                    "geometryAvailable":geometry.is_some(),
+                });
+                let len = row.to_string().len();
+                if bytes + len > 2800 {
+                    break;
+                }
+                bytes += len;
+                result.push(row);
+            }
+        }
+        Ok(serde_json::json!({
+            "revision":revision,
+            "count":value.get("count"),
+            "returned":result.len(),
+            "offset":value.get("offset"),
+            "entities":result,
+            "hasMore":value.get("count").and_then(serde_json::Value::as_u64).unwrap_or(0)>
+                value.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(0)+result.len() as u64,
+        }))
+    }
 
     /// Consume exactly-once verified disk acknowledgements and finalize only their matching
     /// drawing. A failure leaves the engine's DocState.save_pending dirty; another drawing's
@@ -351,17 +404,19 @@ fn bounded_read(app: &mut CadApp, name: &str, input: &serde_json::Value) -> Resu
     pub fn apply_verified_saves(&self, app: &mut CadApp) {
         let names = std::mem::take(&mut *self.verified.borrow_mut());
         for name in names {
-            if self.failed.borrow().contains(&name)
-                || self.pending.borrow().values().any(|pending_name| pending_name == &name)
-            {
+            if self.failed.borrow().contains(&name) || self.pending.borrow().values().any(|pending_name| pending_name == &name) {
                 continue;
             }
             // A filename alone is not a unique drawing identifier. Never let the ACK
             // for one tab silently finalize two tabs with the same basename.
-            let candidates: Vec<usize> = app.session.docs.iter().enumerate()
-                .filter(|(_, doc)| doc.save_pending && doc.path.as_deref().is_some_and(
-                    |p| p == name || p.rsplit(['/', '\\']).next() == Some(name.as_str())
-                ))
+            let candidates: Vec<usize> = app
+                .session
+                .docs
+                .iter()
+                .enumerate()
+                .filter(|(_, doc)| {
+                    doc.save_pending && doc.path.as_deref().is_some_and(|p| p == name || p.rsplit(['/', '\\']).next() == Some(name.as_str()))
+                })
                 .map(|(index, _)| index)
                 .collect();
             if let [index] = candidates.as_slice() {
@@ -374,8 +429,7 @@ fn bounded_read(app: &mut CadApp, name: &str, input: &serde_json::Value) -> Resu
 
     /// After each frame: tell the parent when unsaved changes appear or go away.
     pub fn report_dirty(&self, app: &CadApp, reported: &DirtyReport) {
-        let dirty = app.session.docs.iter().any(|d| d.is_dirty())
-            || !self.pending.borrow().is_empty() || !self.failed.borrow().is_empty();
+        let dirty = app.session.docs.iter().any(|d| d.is_dirty()) || !self.pending.borrow().is_empty() || !self.failed.borrow().is_empty();
         if reported.0.get() != Some(dirty) && self.send(&[("type", "cadcraft:dirty".into()), ("dirty", dirty.into())]) {
             reported.0.set(Some(dirty));
         }
@@ -387,11 +441,15 @@ fn bounded_read(app: &mut CadApp, name: &str, input: &serde_json::Value) -> Resu
         let request_id = format!("cad-save-{next}");
         let buffer = js_sys::Uint8Array::from(bytes).buffer();
         let message = message(&[
-            ("type", "cadcraft:save".into()), ("name", name.into()),
-            ("requestId", request_id.clone().into()), ("bytes", buffer.clone().into()),
-        ]).ok_or_else(|| "couldn't build the message".to_string())?;
+            ("type", "cadcraft:save".into()),
+            ("name", name.into()),
+            ("requestId", request_id.clone().into()),
+            ("bytes", buffer.clone().into()),
+        ])
+        .ok_or_else(|| "couldn't build the message".to_string())?;
         self.pending.borrow_mut().insert(request_id.clone(), name.to_string());
-        let sent = self.parent
+        let sent = self
+            .parent
             .post_message_with_transfer(&message, &self.origin, &js_sys::Array::of1(&buffer))
             .map_err(|e| e.as_string().unwrap_or_else(|| format!("{e:?}")));
         if sent.is_err() {
@@ -442,22 +500,22 @@ fn byte_array(data: &JsValue) -> Option<js_sys::Uint8Array> {
 
 #[cfg(test)]
 mod lizhi_entity_bridge_tests {
-    use super::{safe_command,checked_geometry};
+    use super::{checked_geometry, safe_command};
     use serde_json::json;
     #[test]
     fn read_commands_are_bounded_and_do_not_allow_file_or_script_access() {
-        assert!(safe_command("lizhi.inspect",&json!({})));
-        assert!(!safe_command("lizhi.inspect",&json!({"entities":true})));
-        assert!(checked_geometry("lizhi.entities",&json!({"type":"Line","limit":8,"offset":10})));
-        assert!(!checked_geometry("lizhi.entities",&json!({"limit":1000})));
-        assert!(!checked_geometry("lizhi.entities",&json!({"path":"/private/diagram.dxf"})));
-        assert!(!checked_geometry("lizhi.entities",&json!({"window":[[-1,-1],[1,1]]})));
-        assert!(!checked_geometry("lizhi.entities",&json!({"selected":"yes"})));
-        assert!(!checked_geometry("execute",&json!({"command":"erase"})));
-        let move_ok=json!({"handles":["1A"],"delta":[100,0],"expectedRevision":3,"confirmed":true});
-        assert!(checked_geometry("lizhi.move",&move_ok));
-        assert!(!checked_geometry("lizhi.move",&json!({"handles":["1A"],"delta":[100,0],"confirmed":true})));
-        assert!(!checked_geometry("lizhi.move",&json!({"handles":["1A","2B"],"delta":[100,0],"expectedRevision":3,"confirmed":true})));
-        assert!(!checked_geometry("lizhi.move",&json!({"handles":["1A"],"delta":[100,0],"expectedRevision":3,"confirmed":false})));
+        assert!(safe_command("lizhi.inspect", &json!({})));
+        assert!(!safe_command("lizhi.inspect", &json!({"entities":true})));
+        assert!(checked_geometry("lizhi.entities", &json!({"type":"Line","limit":8,"offset":10})));
+        assert!(!checked_geometry("lizhi.entities", &json!({"limit":1000})));
+        assert!(!checked_geometry("lizhi.entities", &json!({"path":"/private/diagram.dxf"})));
+        assert!(!checked_geometry("lizhi.entities", &json!({"window":[[-1,-1],[1,1]]})));
+        assert!(!checked_geometry("lizhi.entities", &json!({"selected":"yes"})));
+        assert!(!checked_geometry("execute", &json!({"command":"erase"})));
+        let move_ok = json!({"handles":["1A"],"delta":[100,0],"expectedRevision":3,"confirmed":true});
+        assert!(checked_geometry("lizhi.move", &move_ok));
+        assert!(!checked_geometry("lizhi.move", &json!({"handles":["1A"],"delta":[100,0],"confirmed":true})));
+        assert!(!checked_geometry("lizhi.move", &json!({"handles":["1A","2B"],"delta":[100,0],"expectedRevision":3,"confirmed":true})));
+        assert!(!checked_geometry("lizhi.move", &json!({"handles":["1A"],"delta":[100,0],"expectedRevision":3,"confirmed":false})));
     }
 }
